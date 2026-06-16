@@ -1,0 +1,14 @@
+{
+  "name": "cc-wechat",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "通过微信远程控制 Claude Code CLI",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "setup": "node src/index.js --setup"
+  },
+  "dependencies": {
+    "qrcode-terminal": "^0.12.0"
+  }
+}
