@@ -1,20 +1,32 @@
-# hook-notify.ps1 — 独立 Hook 脚本：从 CC hook stdin 读取事件 → 写通知文件
-# 由 Claude Code 的 Stop/Notification hook 触发，不阻塞 CC
-# 参数 -ClaudeDir 标识触发来源的 Claude 配置目录
-param(
-    [string]$ClaudeDir = ''
-)
+# hook-notify.ps1 — CC hook -> write notify file
+# Called via: powershell -Command "& ([scriptblock]::Create([IO.File]::ReadAllText(...))) -ClaudeDir ..."
+param([string]$ClaudeDir = '')
 
-$ErrorActionPreference = 'SilentlyContinue'
+$logFile = Join-Path $env:TEMP 'cc-wechat-hook.log'
+function Log([string]$m) {
+    try { Add-Content -LiteralPath $logFile -Value ((Get-Date).ToString('HH:mm:ss') + '  ' + $m) -Encoding UTF8 } catch {}
+}
+
 $notifyDir = Join-Path $env:TEMP 'cc-wechat-notify'
 
 try {
-    # 读取 hook stdin
-    $stdin = [Console]::OpenStandardInput()
-    $sr = New-Object System.IO.StreamReader($stdin, [System.Text.Encoding]::UTF8)
-    $raw = $sr.ReadToEnd()
-    $sr.Close()
-    if ([string]::IsNullOrWhiteSpace($raw)) { exit 0 }
+    # Read stdin - try multiple methods
+    $raw = ''
+    try {
+        $stdin = [Console]::OpenStandardInput()
+        $sr = New-Object System.IO.StreamReader($stdin, [System.Text.Encoding]::UTF8)
+        $raw = $sr.ReadToEnd()
+        $sr.Close()
+    } catch {
+        Log "stdin method 1 failed: $_"
+    }
+    if ([string]::IsNullOrWhiteSpace($raw)) {
+        # Fallback: try $input (pipeline)
+        try { $raw = @($input) -join "`n" } catch {}
+    }
+
+    Log "raw_len=$($raw.Length)"
+    if ([string]::IsNullOrWhiteSpace($raw)) { Log 'empty stdin'; exit 0 }
 
     $data = $raw | ConvertFrom-Json
     $evt = [string]$data.hook_event_name
@@ -22,82 +34,98 @@ try {
     $project = if ($cwd) { Split-Path -Leaf $cwd } else { '' }
     $transcript = [string]$data.transcript_path
 
-    if ($evt -eq 'Notification') {
-        $action = if ($data.message) { [string]$data.message } else { '需要你的确认' }
-    } else {
-        $evt = 'Stop'
-        $action = '执行完毕，等待指令'
+    $action = switch ($evt) {
+        'Notification' { if ($data.message) { [string]$data.message } else { 'need_confirm' } }
+        default { $evt = 'Stop'; 'done' }
     }
 
-    # 从 transcript 提取信息
+    # Extract info from transcript
     $lastPrompt = ''
     $lastReply = ''
     $title = ''
     $sessionId = ''
 
     if ($transcript -and (Test-Path -LiteralPath $transcript)) {
-        # 从文件名提取 sessionId
         $sessionId = [System.IO.Path]::GetFileNameWithoutExtension($transcript)
-
         $lines = [System.IO.File]::ReadAllLines($transcript, [System.Text.Encoding]::UTF8)
 
-        # 最后一条用户消息
         for ($i = $lines.Length - 1; $i -ge 0; $i--) {
             $line = $lines[$i]
-            if (-not $line -or ($line -notmatch '"type"\s*:\s*"user"')) { continue }
+            if (-not $line -or $line -notmatch '"type"\s*:\s*"user"') { continue }
             try { $obj = $line | ConvertFrom-Json } catch { continue }
             if ($obj.type -ne 'user' -or -not $obj.message -or $obj.message.role -ne 'user') { continue }
             $c = $obj.message.content
-            if ($c -is [string]) {
-                $t = $c.Trim()
-                if ($t.Length -gt 0 -and $t[0] -ne '<' -and -not $t.StartsWith('Caveat:')) {
-                    $lastPrompt = $t
-                    break
-                }
+            if ($c -is [string] -and $c.Trim().Length -gt 0 -and $c.Trim()[0] -ne '<') {
+                $lastPrompt = $c.Trim()
+                break
             }
         }
 
-        # 最后一条 assistant 回复
         for ($i = $lines.Length - 1; $i -ge 0; $i--) {
             $line = $lines[$i]
-            if (-not $line -or ($line -notmatch '"type"\s*:\s*"assistant"')) { continue }
+            if (-not $line -or $line -notmatch '"type"\s*:\s*"assistant"') { continue }
             try { $obj = $line | ConvertFrom-Json } catch { continue }
             if ($obj.type -eq 'assistant' -and $obj.message -and $obj.message.role -eq 'assistant') {
                 $c = $obj.message.content
                 if ($c -is [string]) { $lastReply = $c }
                 elseif ($c -is [array]) {
-                    $lastReply = ($c | Where-Object { $_.type -eq 'text' } | ForEach-Object { $_.text }) -join "`n"
+                    # 1. 提取普通文本回复
+                    $textArr = $c | Where-Object { $_.type -eq 'text' } | ForEach-Object { $_.text }
+                    $lastReply = $textArr -join "`n"
+
+                    # 2. 提取 Tool Use (AskUserQuestion 或 Permission)
+                    $tools = $c | Where-Object { $_.type -eq 'tool_use' }
+                    foreach ($tu in $tools) {
+                        if ($tu.name -eq 'AskUserQuestion') {
+                            $lastReply += "`n❓ 问题: " + $tu.input.question
+                        } else {
+                            $toolDesc = $tu.name
+                            if ($tu.name -eq 'Bash' -and $tu.input.command) { 
+                                $toolDesc += " (" + $tu.input.command + ")" 
+                            } elseif ($tu.name -match 'File' -and $tu.input.target_file) { 
+                                $toolDesc += " (" + $tu.input.target_file + ")" 
+                            }
+                            $lastReply += "`n🛡️ 请求授权工具: " + $toolDesc
+                        }
+                    }
                 }
                 break
             }
         }
 
-        # 会话标题
         for ($i = $lines.Length - 1; $i -ge 0; $i--) {
             $line = $lines[$i]
-            if (-not $line -or ($line -notmatch '"type"\s*:\s*"summary"')) { continue }
+            if (-not $line -or $line -notmatch '"type"\s*:\s*"summary"') { continue }
             try { $obj = $line | ConvertFrom-Json } catch { continue }
             if ($obj.type -eq 'summary' -and $obj.summary) { $title = [string]$obj.summary; break }
         }
     }
 
-    # 截断
     if ($lastPrompt.Length -gt 200) { $lastPrompt = $lastPrompt.Substring(0, 200) + '...' }
     if ($lastReply.Length -gt 500) { $lastReply = $lastReply.Substring(0, 500) + '...' }
     if ($title.Length -gt 80) { $title = $title.Substring(0, 80) + '...' }
 
-    # 查找 PID
-    $pid = 0
+    # Find PID
+    $procPid = 0
     if ($sessionId -and $ClaudeDir) {
         $sessDir = Join-Path $ClaudeDir 'sessions'
         if (Test-Path $sessDir) {
             Get-ChildItem $sessDir -Filter '*.json' | ForEach-Object {
                 try {
                     $s = Get-Content $_.FullName -Raw | ConvertFrom-Json
-                    if ($s.sessionId -eq $sessionId) { $pid = [int]$s.pid }
+                    if ($s.sessionId -eq $sessionId) { $procPid = [int]$s.pid }
                 } catch {}
             }
         }
+    }
+
+    # 读取终端屏幕内容 (如果是需要用户操作的 Notification)
+    $screenText = ""
+    if ($evt -eq 'Notification' -and $procPid -gt 0) {
+        try {
+            $rsPath = Join-Path $PSScriptRoot 'read-screen.ps1'
+            $screenText = powershell -NoProfile -ExecutionPolicy Bypass -File $rsPath -TargetPid $procPid
+        } catch {}
     }
 
     $payload = [ordered]@{
@@ -107,17 +135,18 @@ try {
         title     = $title
         prompt    = $lastPrompt
         lastReply = $lastReply
-        pid       = $pid
+        screenText= $screenText
+        pid       = $procPid
         sessionId = $sessionId
         claudeDir = $ClaudeDir
         timestamp = [long](Get-Date -UFormat %s) * 1000
     } | ConvertTo-Json -Compress
 
-    # 写入通知目录
     if (-not (Test-Path $notifyDir)) { New-Item -ItemType Directory $notifyDir -Force | Out-Null }
     $outFile = Join-Path $notifyDir ([guid]::NewGuid().ToString('N') + '.json')
     [System.IO.File]::WriteAllText($outFile, $payload, (New-Object System.Text.UTF8Encoding($false)))
 
+    Log "OK event=$evt project=$project file=$outFile"
 } catch {
-    # Hook 不应阻塞 CC，静默失败
+    Log "ERROR: $_"
 }

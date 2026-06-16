@@ -4,7 +4,7 @@
 #   powershell -File inject.ps1 -TargetPid 12345 -ShiftTab
 param(
     [Parameter(Mandatory)][int]$TargetPid,
-    [switch]$ShiftTab   # 仅发送 Shift+Tab（权限切换）
+    [string]$Key
 )
 
 $ErrorActionPreference = 'Stop'
@@ -13,6 +13,7 @@ Add-Type -TypeDefinition @"
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.IO;
 
 public class ConsoleInjector
 {
@@ -22,17 +23,39 @@ public class ConsoleInjector
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool AttachConsole(int dwProcessId);
 
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern IntPtr CreateFileW(
+        string lpFileName,
+        uint dwDesiredAccess,
+        uint dwShareMode,
+        IntPtr lpSecurityAttributes,
+        uint dwCreationDisposition,
+        uint dwFlagsAndAttributes,
+        IntPtr hTemplateFile
+    );
+
     [DllImport("kernel32.dll", SetLastError = true)]
-    static extern IntPtr GetStdHandle(int nStdHandle);
+    static extern bool CloseHandle(IntPtr hObject);
 
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     static extern bool WriteConsoleInputW(IntPtr h, INPUT_RECORD[] buf, int len, out int written);
 
-    const int STD_INPUT_HANDLE = -10;
+    const uint GENERIC_READ  = 0x80000000;
+    const uint GENERIC_WRITE = 0x40000000;
+    const uint FILE_SHARE_READ  = 0x00000001;
+    const uint FILE_SHARE_WRITE = 0x00000002;
+    const uint OPEN_EXISTING = 3;
+
     const short KEY_EVENT = 1;
     const short VK_RETURN = 0x0D;
     const short VK_SHIFT  = 0x10;
     const short VK_TAB    = 0x09;
+    const short VK_SPACE  = 0x20;
+    const short VK_UP     = 0x26;
+    const short VK_DOWN   = 0x28;
+    const short VK_LEFT   = 0x25;
+    const short VK_RIGHT  = 0x27;
+    const short VK_ESCAPE = 0x1B;
     const int SHIFT_PRESSED = 0x0010;
 
     [StructLayout(LayoutKind.Explicit)]
@@ -65,15 +88,20 @@ public class ConsoleInjector
         return r;
     }
 
+    private static IntPtr OpenConIn()
+    {
+        return CreateFileW("CONIN$", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
+    }
+
     public static string InjectText(int pid, string text)
     {
         FreeConsole();
         if (!AttachConsole(pid))
             return "ERR:AttachConsole failed, code=" + Marshal.GetLastWin32Error();
 
-        IntPtr h = GetStdHandle(STD_INPUT_HANDLE);
+        IntPtr h = OpenConIn();
         if (h == IntPtr.Zero || h == new IntPtr(-1))
-        { FreeConsole(); return "ERR:GetStdHandle failed"; }
+        { FreeConsole(); return "ERR:OpenConIn failed, code=" + Marshal.GetLastWin32Error(); }
 
         var ev = new List<INPUT_RECORD>();
         string[] lines = text.Replace("\r\n", "\n").Split('\n');
@@ -101,38 +129,61 @@ public class ConsoleInjector
         var arr = ev.ToArray();
         int w;
         bool ok = WriteConsoleInputW(h, arr, arr.Length, out w);
+        CloseHandle(h);
         FreeConsole();
         return ok ? "ok:" + w : "ERR:Write failed, code=" + Marshal.GetLastWin32Error();
     }
 
-    public static string InjectShiftTab(int pid)
+    public static string InjectKey(int pid, string keyName)
     {
         FreeConsole();
         if (!AttachConsole(pid))
             return "ERR:AttachConsole failed, code=" + Marshal.GetLastWin32Error();
 
-        IntPtr h = GetStdHandle(STD_INPUT_HANDLE);
+        IntPtr h = OpenConIn();
         if (h == IntPtr.Zero || h == new IntPtr(-1))
-        { FreeConsole(); return "ERR:GetStdHandle failed"; }
+        { FreeConsole(); return "ERR:OpenConIn failed, code=" + Marshal.GetLastWin32Error(); }
 
-        var ev = new INPUT_RECORD[] {
-            K(true,  VK_SHIFT, '\0', SHIFT_PRESSED),
-            K(true,  VK_TAB,   '\t', SHIFT_PRESSED),
-            K(false, VK_TAB,   '\t', SHIFT_PRESSED),
-            K(false, VK_SHIFT, '\0', 0),
-        };
+        List<INPUT_RECORD> ev = new List<INPUT_RECORD>();
+        keyName = keyName.ToLower();
 
+        if (keyName == "shifttab") {
+            ev.Add(K(true,  VK_SHIFT, '\0', SHIFT_PRESSED));
+            ev.Add(K(true,  VK_TAB,   '\t', SHIFT_PRESSED));
+            ev.Add(K(false, VK_TAB,   '\t', SHIFT_PRESSED));
+            ev.Add(K(false, VK_SHIFT, '\0', 0));
+        } else {
+            short vk = 0;
+            char ch = '\0';
+            switch (keyName) {
+                case "up": vk = VK_UP; break;
+                case "down": vk = VK_DOWN; break;
+                case "left": vk = VK_LEFT; break;
+                case "right": vk = VK_RIGHT; break;
+                case "space": vk = VK_SPACE; ch = ' '; break;
+                case "tab": vk = VK_TAB; ch = '\t'; break;
+                case "enter": vk = VK_RETURN; ch = '\r'; break;
+                case "esc": vk = VK_ESCAPE; break;
+                default: return "ERR:Unknown key " + keyName;
+            }
+            ev.Add(K(true, vk, ch, 0));
+            ev.Add(K(false, vk, ch, 0));
+        }
+
+        var arr = ev.ToArray();
         int w;
-        bool ok = WriteConsoleInputW(h, ev, ev.Length, out w);
+        bool ok = WriteConsoleInputW(h, arr, arr.Length, out w);
+        CloseHandle(h);
         FreeConsole();
         return ok ? "ok:" + w : "ERR:Write failed, code=" + Marshal.GetLastWin32Error();
     }
 }
 "@ -ReferencedAssemblies @()
 
-if ($ShiftTab) {
-    $result = [ConsoleInjector]::InjectShiftTab($TargetPid)
+if (-not [string]::IsNullOrEmpty($Key)) {
+    $result = [ConsoleInjector]::InjectKey($TargetPid, $Key)
 } else {
+    [Console]::InputEncoding = [System.Text.Encoding]::UTF8
     $text = [Console]::In.ReadToEnd()
     if ([string]::IsNullOrEmpty($text)) {
         Write-Output "ERR:empty input"

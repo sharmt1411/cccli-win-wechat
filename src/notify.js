@@ -90,6 +90,17 @@ export class NotifyWatcher {
 
     if (d.lastReply) {
       lines.push(`📄 回复: ${d.lastReply}`);
+      
+      // 增加友好的操作指引
+      if (d.lastReply.includes('❓ 问题:')) {
+        lines.push(`\n💡 提示：直接回复文本即可回答问题。如果是 TUI 菜单，请使用 /up, /down 等指令交互。`);
+      } else if (d.lastReply.includes('🛡️ 请求授权工具:')) {
+        lines.push(`\n💡 提示：回复 y 同意执行，回复 n 拒绝，或使用 /perm 切换焦点`);
+      }
+    }
+
+    if (d.screenText) {
+      lines.push(`\n📺 当前终端界面：\n${d.screenText}`);
     }
 
     if (d.source || d.claudeDir) {

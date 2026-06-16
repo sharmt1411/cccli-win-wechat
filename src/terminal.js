@@ -57,20 +57,38 @@ export async function newTab({ cwd, taskDescription, claudeDir }) {
 }
 
 /**
- * 切换目标会话的权限模式（注入 Shift+Tab 按键）
+ * 注入按键
+ * @param {number} pid - 目标进程 PID
+ * @param {string} keyName - 按键名称
+ */
+export async function injectKey(pid, keyName) {
+  return new Promise((resolve, reject) => {
+    execFile(
+      'powershell',
+      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', join(__dirname, '..', 'scripts', 'inject.ps1'), '-TargetPid', pid.toString(), '-Key', keyName],
+      { encoding: 'utf8' },
+      (err, stdout, stderr) => {
+        if (err) return reject(new Error(stderr || err.message));
+        resolve(stdout);
+      }
+    );
+  });
+}
+
+/**
+ * 捕获终端可见屏幕内容
  * @param {number} pid - 目标进程 PID
  */
-export async function togglePermission(pid) {
+export async function readScreen(pid) {
   return new Promise((resolve, reject) => {
-    const ps = execFile('powershell.exe', [
-      '-NoProfile', '-ExecutionPolicy', 'Bypass',
-      '-File', INJECT_SCRIPT,
-      '-TargetPid', String(pid),
-      '-ShiftTab',
-    ], { timeout: 10000 }, (err, stdout, stderr) => {
-      if (err) return reject(new Error(`perm toggle failed: ${stderr || err.message}`));
-      resolve(stdout.trim());
-    });
-    ps.stdin.end();
+    execFile(
+      'powershell',
+      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', join(__dirname, '..', 'scripts', 'read-screen.ps1'), '-TargetPid', pid.toString()],
+      { encoding: 'utf8', timeout: 5000 },
+      (err, stdout, stderr) => {
+        if (err) return reject(new Error(stderr || err.message));
+        resolve(stdout.trim());
+      }
+    );
   });
 }

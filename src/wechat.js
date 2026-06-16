@@ -27,14 +27,26 @@ export class WeChatBot {
     this._polling = false;
   }
 
-  async _fetch(path, opts = {}) {
+  async _fetch(path, opts = {}, timeoutMs = 45000) {
     const url = `${this.baseUrl}${path}`;
-    const res = await fetch(url, {
-      ...opts,
-      headers: headers(this.token),
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status} ${url}`);
-    return res.json();
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, {
+        ...opts,
+        headers: headers(this.token),
+        signal: ac.signal,
+      });
+      clearTimeout(timer);
+      if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        throw new Error(`HTTP ${res.status} ${url} body=${body.substring(0, 200)}`);
+      }
+      return res.json();
+    } catch (e) {
+      clearTimeout(timer);
+      throw e;
+    }
   }
 
   // ── 登录 ──
@@ -97,8 +109,11 @@ export class WeChatBot {
     this._polling = true;
     console.log('📡 开始微信消息轮询...');
 
+    let pollCount = 0;
     while (this._polling) {
       try {
+        pollCount++;
+        console.log(`📡 轮询 #${pollCount} 发送中... (buf=${this.buf ? this.buf.substring(0,20)+'...' : '空'})`);
         const data = await this._fetch('/ilink/bot/getupdates', {
           method: 'POST',
           body: JSON.stringify({
@@ -106,6 +121,12 @@ export class WeChatBot {
             base_info: { channel_version: '1.0.2' },
           }),
         });
+        console.log(`📡 轮询 #${pollCount} 返回: ret=${data.ret} msgs=${data.msgs?.length || 0}`);
+
+        // 首次轮询打印完整响应
+        if (pollCount === 1) {
+          console.log('首次响应:', JSON.stringify(data, null, 2).substring(0, 1000));
+        }
 
         if (data.get_updates_buf) {
           this.buf = data.get_updates_buf;
@@ -113,7 +134,10 @@ export class WeChatBot {
         }
 
         if (data.msgs?.length) {
+          console.log(`📨 收到 ${data.msgs.length} 条消息`);
           for (const msg of data.msgs) {
+            const text = msg.item_list?.[0]?.text_item?.text || '';
+            console.log(`  ├ type=${msg.message_type} state=${msg.message_state} from=${msg.from_user_id?.substring(0,20)}... text="${text.substring(0,50)}"`);
             // 只处理用户发来的消息 (message_type=1)
             if (msg.message_type !== 1) continue;
 
@@ -154,21 +178,30 @@ export class WeChatBot {
   // ── 发送消息 ──
 
   async send(toUserId, contextToken, text) {
-    // 长文本分段（微信单条消息限制）
     const chunks = splitText(text, 2000);
     for (const chunk of chunks) {
-      await this._fetch('/ilink/bot/sendmessage', {
-        method: 'POST',
-        body: JSON.stringify({
-          msg: {
-            to_user_id: toUserId,
-            message_type: 2,
-            message_state: 2,
-            context_token: contextToken,
-            item_list: [{ type: 1, text_item: { text: chunk } }],
-          },
-        }),
-      });
+      console.log(`📤 发送中... to=${toUserId?.substring(0,20)}... ctx=${contextToken ? '有' : '无'} len=${chunk.length}`);
+      try {
+        const clientId = `cc-wechat:${Date.now()}-${Math.floor(Math.random() * 1000000)}`;
+        const result = await this._fetch('/ilink/bot/sendmessage', {
+          method: 'POST',
+          body: JSON.stringify({
+            msg: {
+              from_user_id: "",
+              to_user_id: toUserId,
+              client_id: clientId,
+              message_type: 2,
+              message_state: 2,
+              context_token: contextToken,
+              item_list: [{ type: 1, text_item: { text: chunk } }],
+            },
+          }),
+        });
+        console.log(`📤 发送结果:`, JSON.stringify(result).substring(0, 200));
+      } catch (e) {
+        console.error(`📤 发送失败:`, e.message);
+        throw e;
+      }
     }
   }
 
