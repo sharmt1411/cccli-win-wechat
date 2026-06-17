@@ -7,6 +7,73 @@ function Log([string]$m) {
     try { Add-Content -LiteralPath $logFile -Value ((Get-Date).ToString('HH:mm:ss') + '  ' + $m) -Encoding UTF8 } catch {}
 }
 
+function HasMenuOptions([string]$text) {
+    if ([string]::IsNullOrWhiteSpace($text)) { return $false }
+    return $text -match '(?m)^\s*(?:[>❯]\s*)?(?:[☐☑☒□■✓✔]|\[[ xX✓✔]\])?\s*\d{1,2}(?:[.)、:：])\s*(?:[☐☑☒□■✓✔]|\[[ xX✓✔]\])?'
+}
+
+function GetProp($obj, [string]$name, $default = $null) {
+    if ($null -eq $obj) { return $default }
+    if ($obj.PSObject.Properties.Name -contains $name) { return $obj.$name }
+    return $default
+}
+
+function ConvertOption($opt) {
+    if ($null -eq $opt) { return $null }
+    if ($opt -is [string]) {
+        return [ordered]@{ label = [string]$opt; description = ''; value = [string]$opt }
+    }
+
+    $label = [string](GetProp $opt 'label' (GetProp $opt 'text' (GetProp $opt 'name' (GetProp $opt 'value' ''))))
+    $description = [string](GetProp $opt 'description' (GetProp $opt 'desc' ''))
+    $value = [string](GetProp $opt 'value' $label)
+    if ([string]::IsNullOrWhiteSpace($label) -and [string]::IsNullOrWhiteSpace($value)) { return $null }
+
+    return [ordered]@{
+        label       = $label
+        description = $description
+        value       = $value
+    }
+}
+
+function ConvertQuestion($q) {
+    if ($null -eq $q) { return $null }
+    $opts = @()
+    $rawOptions = GetProp $q 'options' (GetProp $q 'choices' (GetProp $q 'suggestions' @()))
+    foreach ($opt in @($rawOptions)) {
+        $converted = ConvertOption $opt
+        if ($null -ne $converted) { $opts += $converted }
+    }
+
+    return [ordered]@{
+        question    = [string](GetProp $q 'question' (GetProp $q 'prompt' ''))
+        header      = [string](GetProp $q 'header' (GetProp $q 'title' ''))
+        multiSelect = [bool](GetProp $q 'multiSelect' (GetProp $q 'multiselect' $false))
+        options     = $opts
+    }
+}
+
+function DescribeToolUse($tu) {
+    $name = [string]$tu.name
+    $input = $tu.input
+    if ($null -eq $input) { return $name }
+
+    if ($name -eq 'Bash') {
+        $command = [string](GetProp $input 'command' '')
+        $description = [string](GetProp $input 'description' '')
+        if ($command -and $description) { return "$name ($command) - $description" }
+        if ($command) { return "$name ($command)" }
+        return $name
+    }
+
+    foreach ($prop in @('file_path', 'target_file', 'path', 'notebook_path')) {
+        $value = [string](GetProp $input $prop '')
+        if ($value) { return "$name ($value)" }
+    }
+
+    return $name
+}
+
 $notifyDir = Join-Path $env:TEMP 'cc-wechat-notify'
 
 try {
@@ -44,6 +111,7 @@ try {
     $lastReply = ''
     $title = ''
     $sessionId = ''
+    $interaction = $null
 
     if ($transcript -and (Test-Path -LiteralPath $transcript)) {
         $sessionId = [System.IO.Path]::GetFileNameWithoutExtension($transcript)
@@ -77,15 +145,57 @@ try {
                     $tools = $c | Where-Object { $_.type -eq 'tool_use' }
                     foreach ($tu in $tools) {
                         if ($tu.name -eq 'AskUserQuestion') {
-                            $lastReply += "`n❓ 问题: " + $tu.input.question
-                        } else {
-                            $toolDesc = $tu.name
-                            if ($tu.name -eq 'Bash' -and $tu.input.command) { 
-                                $toolDesc += " (" + $tu.input.command + ")" 
-                            } elseif ($tu.name -match 'File' -and $tu.input.target_file) { 
-                                $toolDesc += " (" + $tu.input.target_file + ")" 
+                            $question = ''
+                            if ($tu.input -and $tu.input.question) { $question = [string]$tu.input.question }
+
+                            $questions = @()
+                            if ($tu.input -and $tu.input.PSObject.Properties.Name -contains 'questions') {
+                                foreach ($q in @($tu.input.questions)) {
+                                    $convertedQuestion = ConvertQuestion $q
+                                    if ($null -ne $convertedQuestion) { $questions += $convertedQuestion }
+                                }
                             }
-                            $lastReply += "`n🛡️ 请求授权工具: " + $toolDesc
+
+                            $options = @()
+                            $header = ''
+                            $multiSelect = $false
+                            if ($questions.Count -gt 0) {
+                                $question = [string]$questions[0]['question']
+                                $header = [string]$questions[0]['header']
+                                $multiSelect = [bool]$questions[0]['multiSelect']
+                                $options = $questions[0]['options']
+                            } else {
+                                foreach ($prop in @('options', 'choices', 'suggestions')) {
+                                    if ($tu.input -and $tu.input.PSObject.Properties.Name -contains $prop) {
+                                        $rawOptions = $tu.input.$prop
+                                        foreach ($opt in @($rawOptions)) {
+                                            $convertedOption = ConvertOption $opt
+                                            if ($null -ne $convertedOption) { $options += $convertedOption }
+                                        }
+                                        break
+                                    }
+                                }
+                                $header = [string](GetProp $tu.input 'header' '')
+                                $multiSelect = [bool](GetProp $tu.input 'multiSelect' (GetProp $tu.input 'multiselect' $false))
+                            }
+
+                            $interaction = [ordered]@{
+                                type        = 'ask_user_question'
+                                toolName    = [string]$tu.name
+                                question    = $question
+                                header      = $header
+                                multiSelect = $multiSelect
+                                options     = $options
+                                questions   = $questions
+                            }
+                        } elseif (-not $interaction) {
+                            $toolDesc = DescribeToolUse $tu
+                            $interaction = [ordered]@{
+                                type     = 'tool_permission'
+                                toolName = [string]$tu.name
+                                detail   = [string]$toolDesc
+                                options  = @()
+                            }
                         }
                     }
                 }
@@ -124,7 +234,11 @@ try {
     if ($evt -eq 'Notification' -and $procPid -gt 0) {
         try {
             $rsPath = Join-Path $PSScriptRoot 'read-screen.ps1'
-            $screenText = powershell -NoProfile -ExecutionPolicy Bypass -File $rsPath -TargetPid $procPid
+            for ($attempt = 0; $attempt -lt 4; $attempt++) {
+                if ($attempt -gt 0) { Start-Sleep -Milliseconds 300 }
+                $screenText = powershell -NoProfile -ExecutionPolicy Bypass -File $rsPath -TargetPid $procPid
+                if (HasMenuOptions $screenText) { break }
+            }
         } catch {}
     }
 
@@ -135,12 +249,13 @@ try {
         title     = $title
         prompt    = $lastPrompt
         lastReply = $lastReply
+        interaction = $interaction
         screenText= $screenText
         pid       = $procPid
         sessionId = $sessionId
         claudeDir = $ClaudeDir
         timestamp = [long](Get-Date -UFormat %s) * 1000
-    } | ConvertTo-Json -Compress
+    } | ConvertTo-Json -Compress -Depth 6
 
     if (-not (Test-Path $notifyDir)) { New-Item -ItemType Directory $notifyDir -Force | Out-Null }
     $outFile = Join-Path $notifyDir ([guid]::NewGuid().ToString('N') + '.json')

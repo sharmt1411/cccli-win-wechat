@@ -2,6 +2,7 @@
 import { SessionManager } from './session.js';
 import { injectInput, newTab, injectKey, readScreen } from './terminal.js';
 import { get as getConfig } from './config.js';
+import { normalizeInteraction, resolveQuickReply, sanitizeScreenText } from './interaction.js';
 
 export class Bridge {
   /**
@@ -12,12 +13,22 @@ export class Bridge {
     this.sessions = new SessionManager();
     this.currentTarget = null;      // 当前手动选中的 PID
     this.lastNotifiedPid = null;    // 最近通知到微信的 PID
+    this.pendingInteractions = new Map();
   }
 
   /** 由 NotifyWatcher 调用，更新最后通知的会话 */
   onNotify(data) {
     if (data.pid) {
       this.lastNotifiedPid = data.pid;
+      const interaction = normalizeInteraction(data);
+      if (data.event === 'Notification' && interaction) {
+        this.pendingInteractions.set(data.pid, {
+          interaction,
+          expiresAt: Date.now() + 10 * 60 * 1000,
+        });
+      } else {
+        this.pendingInteractions.delete(data.pid);
+      }
     }
   }
 
@@ -43,14 +54,35 @@ export class Bridge {
     }
 
     try {
-      await injectInput(target.pid, text);
+      if (this._isChoiceLike(text)) {
+        await this._refreshPendingInteraction(target.pid);
+      }
+
+      const quickReply = this._resolveInteractionReply(text, target.pid);
+      const payload = quickReply?.value || text;
+
+      if (quickReply?.mode === 'keys') {
+        await this._injectKeySequence(target.pid, payload);
+      } else if (quickReply?.mode === 'key') {
+        await injectKey(target.pid, payload);
+      } else {
+        await injectInput(target.pid, payload);
+      }
+
+      if (quickReply && quickReply.mode !== 'keys') {
+        this.pendingInteractions.delete(target.pid);
+      }
       
       // 等待终端重绘并抓取屏幕
       await new Promise(r => setTimeout(r, 600));
       const screen = await readScreen(target.pid);
-      const suffix = screen ? `\n\n📺 界面更新：\n${screen}` : '';
+      if (quickReply?.mode === 'keys') {
+        this._refreshPendingInteractionFromScreen(target.pid, screen);
+      }
+      const suffix = this._screenSuffix(screen);
 
-      await this.wechat.reply(msg, `⌨️ 已注入 → [${target.project}]${suffix}`);
+      const action = quickReply ? `已选择 ${quickReply.label}` : '已注入';
+      await this.wechat.reply(msg, `⌨️ ${action} → [${target.project}]${suffix}`);
     } catch (e) {
       await this.wechat.reply(msg, `❌ 注入失败: ${e.message}`);
     }
@@ -73,10 +105,16 @@ export class Bridge {
         return this._cmdLast(msg);
       case '/perm':
         return this._cmdKey('shifttab', msg);
+      case '/pick':
+        return this._cmdPick(parts.slice(1), msg);
       case '/up':
         return this._cmdKeyRepeated('up', parts[1], msg);
       case '/down':
         return this._cmdKeyRepeated('down', parts[1], msg);
+      case '/left':
+        return this._cmdKeyRepeated('left', parts[1], msg);
+      case '/right':
+        return this._cmdKeyRepeated('right', parts[1], msg);
       case '/space':
         return this._cmdKeyRepeated('space', parts[1], msg);
       case '/enter':
@@ -171,6 +209,34 @@ export class Bridge {
   }
 
   /** 发送控制键（支持重复次数） */
+  async _cmdPick(args, msg) {
+    const target = this._resolveTarget();
+    if (!target) {
+      await this.wechat.reply(msg, '❌ 没有活跃的 CC 会话');
+      return;
+    }
+
+    const choice = args.join(' ').trim();
+    await this._refreshPendingInteraction(target.pid);
+    const quickReply = this._resolveInteractionReply(choice, target.pid);
+    if (!quickReply || quickReply.mode !== 'keys') {
+      await this.wechat.reply(msg, '❌ 当前没有可批量选择的复选菜单，或选项编号无效');
+      return;
+    }
+
+    try {
+      await this._injectKeySequence(target.pid, quickReply.value);
+
+      await new Promise(r => setTimeout(r, 600));
+      const screen = await readScreen(target.pid);
+      this._refreshPendingInteractionFromScreen(target.pid, screen);
+      const suffix = this._screenSuffix(screen);
+      await this.wechat.reply(msg, `⌨️ 已选择 ${quickReply.label} → [${target.project}]${suffix}`);
+    } catch (e) {
+      await this.wechat.reply(msg, `❌ 批量选择失败: ${e.message}`);
+    }
+  }
+
   async _cmdKeyRepeated(keyName, countStr, msg) {
     let count = 1;
     if (countStr) {
@@ -198,7 +264,8 @@ export class Bridge {
       // 等待终端重绘
       await new Promise(r => setTimeout(r, 400));
       const screen = await readScreen(target.pid);
-      const suffix = screen ? `\n\n📺 界面更新：\n${screen}` : '';
+      this._refreshPendingInteractionFromScreen(target.pid, screen);
+      const suffix = this._screenSuffix(screen);
       
       const countMsg = count > 1 ? ` (${count}次)` : '';
       await this.wechat.reply(msg, `⌨️ 发送 [${keyName.toUpperCase()}]${countMsg}${suffix}`);
@@ -224,7 +291,8 @@ export class Bridge {
       if (!screen) {
         await this.wechat.reply(msg, '📺 屏幕为空或获取失败');
       } else {
-        await this.wechat.reply(msg, `📺 当前界面 [${target.project}]:\n\n${screen}`);
+        this._refreshPendingInteractionFromScreen(target.pid, screen);
+        await this.wechat.reply(msg, `📺 当前界面 [${target.project}]:\n\n${sanitizeScreenText(screen)}`);
       }
     } catch(e) {
       await this.wechat.reply(msg, `❌ 获取屏幕失败: ${e.message}`);
@@ -241,8 +309,12 @@ export class Bridge {
       '/to N      → 切换到第 N 个会话',
       '/new [任务] → 新开 tab',
       '/last      → 查看最后回复',
+      '收到提问/授权通知时，优先直接回复数字选择',
+      '多分类问题可回复 [1 3][1][2] 一次提交',
+      '单分类问题也用 [1] 或 [1 3]；/pick 1 3 可手动批量选择',
       '-- 按键注入 --',
       '/up /down  → 上下选择',
+      '/left /right → 左右选择',
       '/space     → 空格(多选勾选)',
       '/enter     → 回车确认',
       '/tab       → Tab 切换',
@@ -271,5 +343,86 @@ export class Bridge {
 
     // 3. updatedAt 最近的
     return list[0];
+  }
+
+  _resolveInteractionReply(text, pid) {
+    const pending = this.pendingInteractions.get(pid);
+    if (!pending) return null;
+
+    if (pending.expiresAt < Date.now()) {
+      this.pendingInteractions.delete(pid);
+      return null;
+    }
+
+    return resolveQuickReply(text, pending.interaction);
+  }
+
+  async _injectKeySequence(pid, keys) {
+    for (const key of keys) {
+      await injectKey(pid, key);
+      await new Promise(r => setTimeout(r, 120));
+    }
+  }
+
+  async _refreshPendingInteraction(pid) {
+    const pending = this.pendingInteractions.get(pid);
+    if (!pending) return null;
+
+    if (pending.expiresAt < Date.now()) {
+      this.pendingInteractions.delete(pid);
+      return null;
+    }
+
+    try {
+      const screen = await readScreen(pid);
+      this._refreshPendingInteractionFromScreen(pid, screen);
+      return screen;
+    } catch {
+      return null;
+    }
+  }
+
+  _refreshPendingInteractionFromScreen(pid, screenText) {
+    const pending = this.pendingInteractions.get(pid);
+    if (!pending || !screenText) return;
+
+    const interaction = normalizeInteraction({
+      event: 'Notification',
+      interaction: {
+        type: pending.interaction.type,
+        question: pending.interaction.question,
+        header: pending.interaction.header,
+        multiSelect: pending.interaction.multiSelect,
+        questions: pending.interaction.questions,
+        toolName: pending.interaction.toolName,
+        detail: pending.interaction.detail,
+        options: pending.interaction.options,
+      },
+      screenText,
+    });
+
+    if (interaction?.screenOptions?.length) {
+      this.pendingInteractions.set(pid, {
+        interaction,
+        expiresAt: Date.now() + 10 * 60 * 1000,
+      });
+    }
+  }
+
+  _isChoiceLike(text) {
+    const s = String(text).trim();
+    if (/^(?:\[[\d\s,，、]+\]\s*)+$/.test(s)) return true;
+
+    const target = this._resolveTarget();
+    const pending = target ? this.pendingInteractions.get(target.pid) : null;
+    if (pending?.interaction?.type !== 'ask_user_question' && /^(?:y|yes|n|no|同意|允许|拒绝|取消)$/i.test(s)) {
+      return true;
+    }
+    return pending?.interaction?.type !== 'ask_user_question'
+      && /^\d{1,2}(?:\s*[,，、\s]\s*\d{1,2})*$/.test(s);
+  }
+
+  _screenSuffix(screen) {
+    return screen ? `\n\n📺 界面更新：\n${sanitizeScreenText(screen)}` : '';
   }
 }

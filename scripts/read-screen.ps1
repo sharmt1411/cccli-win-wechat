@@ -79,12 +79,7 @@ public class ConsoleReader
             sb.Append(' ', width);
             if (ReadConsoleOutputCharacterW(h, sb, (uint)width, coord, out read)) {
                 string line = sb.ToString(0, (int)read).TrimEnd(' ', '\0');
-                if (y == cursorY) {
-                    // Mark cursor line
-                    lines.Add(line + " 👈");
-                } else {
-                    lines.Add(line);
-                }
+                lines.Add(line);
             }
         }
 
