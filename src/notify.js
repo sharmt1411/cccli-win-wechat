@@ -59,9 +59,14 @@ export class NotifyWatcher {
       const raw = readFileSync(filePath, 'utf-8');
       const data = JSON.parse(raw);
       await this._enrichScreen(data);
+      const interaction = normalizeInteraction(data);
+      if (isGenericWaitingNotification(data, interaction)) {
+        console.log(`🔇 通用等待通知已忽略: ${data.event} [${data.project}]`);
+        return;
+      }
 
       // 格式化并推送微信。Bridge 可以选择暂缓推送，例如新 tab 正在启动时。
-      const text = this._format(data);
+      const text = this._format(data, interaction);
       const routed = this.onNotify?.(data, text);
       if (routed !== false) {
         await this.wechat.push(typeof routed === 'string' ? routed : text);
@@ -98,24 +103,30 @@ export class NotifyWatcher {
     }
   }
 
-  _format(d) {
+  _format(d, normalizedInteraction = null) {
     const isNotif = d.event === 'Notification';
-    const interaction = normalizeInteraction(d);
+    const interaction = normalizedInteraction || normalizeInteraction(d);
     const lines = [];
 
     if (isNotif) {
-      lines.push(`🔔 [${d.project || '未知项目'}] 需要你的操作`);
-      if (!interaction && d.action) lines.push(`❓ ${d.action}`);
+      lines.push('🔔 Claude 需要处理');
     } else {
-      lines.push(`✅ [${d.project || '未知项目'}] 执行完毕`);
+      lines.push('✅ Claude 执行完成');
     }
 
-    if (d.title) lines.push(`📋 ${d.title}`);
-    if (d.prompt) lines.push(`💬 提示: ${d.prompt}`);
+    lines.push(...formatSessionMeta(d));
+
+    if (!interaction && shouldShowAction(d.action)) lines.push(`类型: ${d.action}`);
+    if (d.title) lines.push(`标题: ${d.title}`);
+    if (shouldShowPrompt(d.prompt, interaction)) lines.push(`提示: ${d.prompt}`);
 
     if (d.lastReply) {
       const cleanReply = stripLegacyInteraction(d.lastReply);
-      if (cleanReply) lines.push(`📄 Claude: ${truncateText(cleanReply, 600)}`);
+      if (cleanReply) {
+        lines.push('');
+        lines.push('Claude 最近回复:');
+        lines.push(truncateText(cleanReply, 600));
+      }
     }
 
     if (interaction) {
@@ -126,12 +137,9 @@ export class NotifyWatcher {
     const shouldShowScreen = d.screenText
       && (!interaction || (interaction.type === 'tool_permission' && interaction.promptStyle === 'unknown'));
     if (shouldShowScreen) {
-      lines.push(`\n📺 当前终端界面：\n${sanitizeScreenText(d.screenText, { maxLen: 900 })}`);
-    }
-
-    if (d.source || d.claudeDir) {
-      const src = d.source || d.claudeDir?.split(/[/\\]/).pop() || '';
-      if (src && src !== '.claude') lines.push(`📁 来源: ${src}`);
+      lines.push('');
+      lines.push('📺 当前终端界面');
+      lines.push(sanitizeScreenText(d.screenText, { maxLen: 900 }));
     }
 
     return lines.join('\n');
@@ -146,63 +154,77 @@ function formatInteraction(interaction) {
       return lines;
     }
 
-    if (interaction.header) lines.push(`分类：${interaction.header}`);
-    if (interaction.question) lines.push(`问题：${interaction.question}`);
+    if (interaction.header) lines.push(`分类: ${interaction.header}`);
+    if (interaction.question) lines.push(`问题: ${interaction.question}`);
 
     const options = interaction.options.length ? interaction.options : interaction.screenOptions;
     if (options.length) {
-      lines.push('可选回复：');
+      lines.push('');
+      lines.push('可选回复:');
       for (const option of options) {
         lines.push(formatOptionLine(option, interaction.selectionMode));
-        if (option.description) lines.push(`   ${option.description}`);
+        if (option.description) lines.push(`说明: ${option.description}`);
       }
       if (interaction.selectionMode === 'multi') {
-        lines.push('复选：回复 [1 3] 可批量勾选。');
-        lines.push('勾选后按界面需要发送 /enter，或用 /right /enter 切到 Submit 提交。');
-        lines.push('也可以用 /pick 1 3 或方向键命令手动操作。');
+        lines.push('');
+        lines.push('回复格式: [1 3]');
+        lines.push('说明: 可批量勾选。');
+        lines.push('提交: /enter');
+        lines.push('或 /right 后 /enter。');
+        lines.push('手动: /pick 1 3');
+        lines.push('也可用 /up /down /space。');
       } else {
+        lines.push('');
         lines.push(interaction.options.length
-          ? '回复 [1] 即可选择，也可以直接回复自定义文本。'
-          : '回复 [1] 即可选择。也可以用 /up、/down、/enter 操作菜单。');
+          ? '回复格式: [1]\n也可直接回复文本。'
+          : '回复格式: [1]\n也可用 /up /down /enter。');
       }
     } else {
-      lines.push('直接回复文本即可回答。');
+      lines.push('');
+      lines.push('回复方式: 直接回复文本即可回答。');
     }
 
     return lines;
   }
 
-  const lines = ['🛡️ 工具授权'];
+  const lines = ['🛡️ 需要工具授权'];
   const tool = formatToolLabel(interaction);
-  if (tool) lines.push(`工具：${tool}`);
+  if (tool) lines.push(`工具: ${tool}`);
 
   const options = interaction.promptStyle === 'numbered'
     ? interaction.screenOptions
     : [
-        { number: '1', label: 'Yes' },
-        { number: '2', label: 'Yes, allow during this session/project' },
-        { number: '3', label: 'No' },
+        { number: '1', label: 'Yes / 允许' },
+        { number: '2', label: 'Yes / 本会话允许' },
+        { number: '3', label: 'No / 拒绝' },
       ];
 
-  lines.push('回复数字选择：');
+  lines.push('');
+  lines.push('回复数字选择:');
   for (const option of options) {
     lines.push(formatOptionLine(option, interaction.selectionMode));
-    if (option.description) lines.push(`   ${option.description}`);
+    if (option.description) lines.push(`说明: ${option.description}`);
   }
 
+  lines.push('');
   if (interaction.promptStyle === 'numbered') {
-    lines.push('可直接回复数字。兼容 y/yes 选择 Yes，n/no 选择 No。');
-    lines.push('也可以继续使用 /up、/down、/enter 操作终端菜单。');
+    lines.push('快捷: 直接回复数字。');
+    lines.push('y/yes 表示 Yes。');
+    lines.push('n/no 表示 No。');
+    lines.push('手动: /up /down /enter。');
   } else {
-    lines.push('未读到完整菜单时按 Claude 常见 3 项审批展示；n/no 会按 3. No 处理。');
-    lines.push('需要切换权限模式可发 /perm，或用 /screen 查看当前菜单。');
+    lines.push('说明: 未读到完整菜单。');
+    lines.push('按常见 3 项审批展示。');
+    lines.push('n/no 会选择 No。');
+    lines.push('/screen 查看终端菜单。');
+    lines.push('/perm 切换权限模式。');
   }
 
   return lines;
 }
 
 function formatQuestionGroups(interaction) {
-  const lines = ['一次选择多个分类：'];
+  const lines = ['', '一次选择多个分类:'];
   interaction.questions.forEach((question, index) => {
     const mode = question.multiSelect ? 'multi' : 'single';
     const title = question.header || `问题 ${index + 1}`;
@@ -211,13 +233,85 @@ function formatQuestionGroups(interaction) {
     if (question.question) lines.push(question.question);
     for (const option of question.options || []) {
       lines.push(formatOptionLine(option, mode));
-      if (option.description) lines.push(`   ${option.description}`);
+      if (option.description) lines.push(`说明: ${option.description}`);
     }
   });
   lines.push('');
-  lines.push('回复格式：每个分类用一组 []，例如 [1 3][1][2]。单分类也用 [1] 或 [1 3]。');
-  lines.push('发送后会依次选择各分类并切到 Submit 提交。');
+  lines.push('回复格式: 每类一组 []。');
+  lines.push('例如: [1 3][1][2]');
+  lines.push('单分类也用 [1] 或 [1 3]。');
+  lines.push('发送后会切到 Submit 提交。');
   return lines;
+}
+
+function formatSessionMeta(d) {
+  const lines = [];
+  lines.push(`会话: ${d.project || '未知项目'}`);
+  if (d.cwd) lines.push(`目录: ${d.cwd}`);
+  if (d.pid) lines.push(`PID: ${d.pid}`);
+  const src = d.source || d.claudeDir?.split(/[/\\]/).pop() || '';
+  if (src && src !== '.claude') lines.push(`来源: ${src}`);
+  return lines;
+}
+
+function isGenericWaitingNotification(data, interaction) {
+  if (data.event !== 'Notification' || interaction) return false;
+  return isGenericWaitingAction(data.action || data.message || data.prompt);
+}
+
+function shouldShowAction(action) {
+  const text = normalizeForCompare(action);
+  if (!text) return false;
+  if (text === 'done' || text === 'needconfirm') return false;
+  if (isGenericWaitingAction(action)) return false;
+  return true;
+}
+
+function isGenericWaitingAction(value) {
+  const text = normalizeForCompare(value);
+  return text === 'claudeiswaitingforyourinput'
+    || text === 'waitingforyourinput'
+    || text === '等待输入'
+    || text === '正在等待输入';
+}
+
+function shouldShowPrompt(prompt, interaction) {
+  const text = normalizeForCompare(prompt);
+  if (!text) return false;
+  if (!interaction) return true;
+
+  if (interaction.type === 'tool_permission' && /claudeneedsyourpermission|permission|授权/.test(text)) {
+    return false;
+  }
+
+  const pieces = [];
+  if (interaction.question) pieces.push(interaction.question);
+  if (interaction.header) pieces.push(interaction.header);
+  if (interaction.detail) pieces.push(interaction.detail);
+  if (interaction.toolName) pieces.push(interaction.toolName);
+
+  for (const question of interaction.questions || []) {
+    pieces.push(question.question, question.header);
+    for (const option of question.options || []) {
+      pieces.push(option.label, option.description);
+    }
+  }
+
+  for (const option of [...(interaction.options || []), ...(interaction.screenOptions || [])]) {
+    pieces.push(option.label, option.description);
+  }
+
+  return !pieces.some(piece => {
+    const other = normalizeForCompare(piece);
+    return other && (text.includes(other) || other.includes(text));
+  });
+}
+
+function normalizeForCompare(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/\s+/g, '')
+    .replace(/[，。！？、:：；;,.!?()[\]【】"'“”‘’]/g, '');
 }
 
 function stripLegacyInteraction(text) {
@@ -237,8 +331,20 @@ function formatToolLabel(interaction) {
 }
 
 function formatOptionLine(option, selectionMode) {
-  if (selectionMode !== 'multi' || option.checkbox === false) return `${option.number}. ${option.label}`;
+  const label = shortenOptionLabel(option.label);
+  if (selectionMode !== 'multi' || option.checkbox === false) return `[${option.number}] ${label}`;
   const mark = option.checked ? '[x]' : '[ ]';
-  const cursor = option.cursor ? '>' : ' ';
-  return `${cursor} ${mark} ${option.number}. ${option.label}`;
+  const cursor = option.cursor ? '> ' : '';
+  return `${cursor}[${option.number}] ${mark} ${label}`;
+}
+
+function shortenOptionLabel(label) {
+  const text = String(label || '').trim();
+  const normalized = text.toLowerCase();
+  if (normalized === 'yes') return 'Yes / 允许';
+  if (normalized === 'no') return 'No / 拒绝';
+  if (/^yes,\s*allow all edits during this session/.test(normalized)) return 'Yes / 本会话允许编辑';
+  if (/^yes,\s*allow.*session/.test(normalized)) return 'Yes / 本会话允许';
+  if (text.length <= 28) return text;
+  return `${text.slice(0, 26)}...`;
 }

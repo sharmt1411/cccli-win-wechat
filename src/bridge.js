@@ -96,7 +96,7 @@ export class Bridge {
   async _handleReply(text, msg, opts = {}) {
     const target = opts.targetPid ? this.sessions.findByPid(opts.targetPid) : this._resolveTarget();
     if (!target) {
-      await this.wechat.reply(msg, '❌ 没有活跃的 CC 会话');
+      await this.wechat.reply(msg, this._noActiveSessionMessage());
       return;
     }
 
@@ -127,7 +127,10 @@ export class Bridge {
       this._markSessionAnswered(target.pid);
 
       if (!quickReply) {
-        await this.wechat.reply(msg, `⌨️ 已发送 → [${target.project}]`);
+        await this.wechat.reply(msg, [
+          '✅ 已发送',
+          this._formatTargetLines(target),
+        ].join('\n'));
         return;
       }
       
@@ -140,9 +143,13 @@ export class Bridge {
       const suffix = this._screenSuffix(screen);
 
       const action = quickReply ? `已选择 ${quickReply.label}` : '已注入';
-      await this.wechat.reply(msg, `⌨️ ${action} → [${target.project}]${suffix}`);
+      await this.wechat.reply(msg, [
+        `✅ ${action}`,
+        this._formatTargetLines(target),
+        suffix,
+      ].filter(Boolean).join('\n'));
     } catch (e) {
-      await this.wechat.reply(msg, `❌ 注入失败: ${e.message}`);
+      await this.wechat.reply(msg, `❌ 发送失败\n原因: ${e.message}`);
     }
   }
 
@@ -186,7 +193,7 @@ export class Bridge {
       case '/help':
         return this._cmdHelp(msg);
       default:
-        await this.wechat.reply(msg, `❓ 未知命令: ${cmd}\n输入 /help 查看帮助`);
+        await this.wechat.reply(msg, `❓ 未知命令: ${cmd}\n\n发送 /help 查看可用命令。`);
     }
   }
 
@@ -194,18 +201,25 @@ export class Bridge {
   async _cmdList(msg) {
     const list = this.sessions.listActive();
     if (!list.length) {
-      await this.wechat.reply(msg, '📭 没有活跃的 CC 会话');
+      await this.wechat.reply(msg, this._noActiveSessionMessage());
       return;
     }
 
     const target = this._resolveTarget();
-    const lines = ['📋 活跃会话：', ''];
+    const currentIndex = list.findIndex(s => s.pid === target?.pid) + 1;
+    const currentLabel = currentIndex > 0 ? `[${currentIndex}] ${target.project || '未知项目'}` : '未选择';
+    const lines = [
+      `📋 Claude Code 会话（${list.length} 个）`,
+      `当前: ${currentLabel}`,
+      '',
+    ];
     list.forEach((s, i) => {
-      const marker = s.pid === target?.pid ? ' 👈' : '';
-      const status = s.status === 'idle' ? '💤' : '⚡';
-      const src = s.source !== '.claude' ? ` [${s.source}]` : '';
-      lines.push(`${i + 1}. ${status} ${s.project}${src} (PID:${s.pid})${marker}`);
+      lines.push(...this._formatSessionListItem(s, i + 1, s.pid === target?.pid));
+      if (i < list.length - 1) lines.push('');
     });
+    lines.push('');
+    lines.push('切换: 发送 /to N，例如 /to 2。');
+    lines.push('发送文本会进入“当前”会话。');
 
     await this.wechat.reply(msg, lines.join('\n'));
   }
@@ -215,12 +229,16 @@ export class Bridge {
     const idx = parseInt(n) - 1;
     const list = this.sessions.listActive();
     if (isNaN(idx) || idx < 0 || idx >= list.length) {
-      await this.wechat.reply(msg, `❌ 无效序号，当前 ${list.length} 个会话`);
+      await this.wechat.reply(msg, `❌ 会话序号无效\n当前会话数: ${list.length}\n用法: /to N`);
       return;
     }
     this.currentTarget = list[idx].pid;
     const s = list[idx];
-    await this.wechat.reply(msg, `✅ 切换到: ${s.project} (PID:${s.pid})`);
+    await this.wechat.reply(msg, [
+      '✅ 已切换目标会话',
+      this._formatTargetLines(s),
+      `PID: ${s.pid}`,
+    ].join('\n'));
   }
 
   /** /new [目录] [任务] — 新开 tab */
@@ -245,7 +263,11 @@ export class Bridge {
         });
         return;
       }
-      await this.wechat.reply(msg, '❌ 目录不存在或不可访问。可用 /new 进入目录向导，或用 /new .、/new N、/new <目录>。');
+      await this.wechat.reply(msg, [
+        '❌ 目录不存在或不可访问',
+        '下一步: 发送 /new 进入目录选择向导。',
+        '也可以使用: /new .、/new N、/new <目录>',
+      ].join('\n'));
       return;
     }
 
@@ -277,7 +299,13 @@ export class Bridge {
 
       if (!session) {
         holdReason = '未能定位新会话';
-        await this.wechat.reply(msg, `🆕 已开新 tab: ${cwd}${desc}\n未能立即定位新会话，稍后可用 /ls 查看。`);
+        await this.wechat.reply(msg, [
+          '🆕 已打开新 tab',
+          `目录: ${cwd}`,
+          taskDescription ? `任务: ${taskDescription}` : '',
+          '状态: 未能立即定位新会话',
+          '下一步: 稍后发送 /ls 查看会话列表。',
+        ].filter(Boolean).join('\n'));
         return;
       }
 
@@ -294,7 +322,12 @@ export class Bridge {
         await new Promise(r => setTimeout(r, 700));
         const nextScreen = await readScreen(session.pid).catch(() => '');
         drainQueued = true;
-        await this.wechat.reply(msg, `🆕 已开新 tab 并确认信任: ${cwd}${desc}\n已切换目标到 [${session.project}]${this._screenSuffix(nextScreen)}`);
+        await this.wechat.reply(msg, [
+          '🆕 已打开新 tab，并已确认目录信任',
+          this._formatTargetLines(session),
+          taskDescription ? `任务: ${taskDescription}` : '',
+          this._screenSuffix(nextScreen),
+        ].filter(Boolean).join('\n'));
         return;
       }
 
@@ -306,19 +339,25 @@ export class Bridge {
           expiresAt: Date.now() + 10 * 60 * 1000,
         };
         await this.wechat.reply(msg, [
-          `🆕 已开新 tab: ${cwd}${desc}`,
-          `已切换目标到 [${session.project}]，但 Claude 需要确认是否信任该目录。`,
-          '确认信任请发 /enter；不信任可发 /down 后 /enter，或 /esc。',
+          '🆕 已打开新 tab',
+          this._formatTargetLines(session),
+          taskDescription ? `任务: ${taskDescription}` : '',
+          '状态: Claude 正在等待目录信任确认',
+          '下一步: 信任请发 1、信任 或 /enter；不信任可发 /down 后 /enter，或 /esc。',
           this._screenSuffix(screen).trimStart(),
         ].filter(Boolean).join('\n'));
         return;
       }
 
       drainQueued = true;
-      await this.wechat.reply(msg, `🆕 已开新 tab: ${cwd}${desc}\n已切换目标到 [${session.project}]`);
+      await this.wechat.reply(msg, [
+        '🆕 已打开新 tab',
+        this._formatTargetLines(session),
+        taskDescription ? `任务: ${taskDescription}` : '',
+      ].filter(Boolean).join('\n'));
     } catch (e) {
       holdReason = `开新 tab 失败: ${e.message}`;
-      await this.wechat.reply(msg, `❌ 开新 tab 失败: ${e.message}`);
+      await this.wechat.reply(msg, `❌ 打开新 tab 失败\n原因: ${e.message}`);
     } finally {
       if (this.pendingNewTabLaunch === launch) {
         this.pendingNewTabLaunch = null;
@@ -332,25 +371,33 @@ export class Bridge {
   async _cmdLast(msg) {
     const target = this._resolveTarget();
     if (!target) {
-      await this.wechat.reply(msg, '❌ 没有活跃的 CC 会话');
+      await this.wechat.reply(msg, this._noActiveSessionMessage());
       return;
     }
 
     const reply = this.sessions.getLastAssistantMessage(target);
     if (!reply) {
-      await this.wechat.reply(msg, '📭 无回复记录');
+      await this.wechat.reply(msg, [
+        '📭 没有找到 Claude 的最近回复',
+        this._formatTargetLines(target),
+      ].join('\n'));
       return;
     }
 
     const truncated = reply.length > 1500 ? reply.substring(0, 1500) + '\n...(截断)' : reply;
-    await this.wechat.reply(msg, `📄 [${target.project}] 最后回复:\n\n${truncated}`);
+    await this.wechat.reply(msg, [
+      '📄 最近回复',
+      this._formatTargetLines(target),
+      '',
+      truncated,
+    ].join('\n'));
   }
 
   /** 发送控制键（支持重复次数） */
   async _cmdPick(args, msg) {
     const target = this._resolveTarget();
     if (!target) {
-      await this.wechat.reply(msg, '❌ 没有活跃的 CC 会话');
+      await this.wechat.reply(msg, this._noActiveSessionMessage());
       return;
     }
 
@@ -358,7 +405,12 @@ export class Bridge {
     await this._refreshPendingInteraction(target.pid);
     const quickReply = this._resolveInteractionReply(choice, target.pid);
     if (!quickReply || quickReply.mode !== 'keys') {
-      await this.wechat.reply(msg, '❌ 当前没有可批量选择的复选菜单，或选项编号无效');
+      await this.wechat.reply(msg, [
+        '❌ 无法批量选择',
+        this._formatTargetLines(target),
+        '原因: 当前没有可批量选择的复选菜单，或选项编号无效。',
+        '示例: /pick 1 3',
+      ].join('\n'));
       return;
     }
 
@@ -368,11 +420,14 @@ export class Bridge {
       await new Promise(r => setTimeout(r, 600));
       const screen = await readScreen(target.pid);
       this._refreshPendingInteractionFromScreen(target.pid, screen);
-      this._clearTrustHoldIfResolved(target.pid, screen, keyName);
       const suffix = this._screenSuffix(screen);
-      await this.wechat.reply(msg, `⌨️ 已选择 ${quickReply.label} → [${target.project}]${suffix}`);
+      await this.wechat.reply(msg, [
+        `✅ 已选择: ${quickReply.label}`,
+        this._formatTargetLines(target),
+        suffix,
+      ].filter(Boolean).join('\n'));
     } catch (e) {
-      await this.wechat.reply(msg, `❌ 批量选择失败: ${e.message}`);
+      await this.wechat.reply(msg, `❌ 批量选择失败\n原因: ${e.message}`);
     }
   }
 
@@ -387,7 +442,7 @@ export class Bridge {
 
     const target = this._resolveTarget();
     if (!target) {
-      await this.wechat.reply(msg, '❌ 没有活跃的 CC 会话');
+      await this.wechat.reply(msg, this._noActiveSessionMessage());
       return;
     }
 
@@ -404,12 +459,17 @@ export class Bridge {
       await new Promise(r => setTimeout(r, 400));
       const screen = await readScreen(target.pid);
       this._refreshPendingInteractionFromScreen(target.pid, screen);
+      this._clearTrustHoldIfResolved(target.pid, screen, keyName);
       const suffix = this._screenSuffix(screen);
       
       const countMsg = count > 1 ? ` (${count}次)` : '';
-      await this.wechat.reply(msg, `⌨️ 发送 [${keyName.toUpperCase()}]${countMsg}${suffix}`);
+      await this.wechat.reply(msg, [
+        `✅ 已发送按键: ${keyName.toUpperCase()}${countMsg}`,
+        this._formatTargetLines(target),
+        suffix,
+      ].filter(Boolean).join('\n'));
     } catch (e) {
-      await this.wechat.reply(msg, `❌ 键注入失败: ${e.message}`);
+      await this.wechat.reply(msg, `❌ 按键发送失败\n原因: ${e.message}`);
     }
   }
 
@@ -422,51 +482,61 @@ export class Bridge {
   async _cmdScreen(msg) {
     const target = this._resolveTarget();
     if (!target) {
-      await this.wechat.reply(msg, '❌ 没有活跃的 CC 会话');
+      await this.wechat.reply(msg, this._noActiveSessionMessage());
       return;
     }
     try {
       const screen = await readScreen(target.pid);
       if (!screen) {
-        await this.wechat.reply(msg, '📺 屏幕为空或获取失败');
+        await this.wechat.reply(msg, [
+          '📺 当前界面为空，或暂时无法读取',
+          this._formatTargetLines(target),
+        ].join('\n'));
       } else {
         this._refreshPendingInteractionFromScreen(target.pid, screen);
-        await this.wechat.reply(msg, `📺 当前界面 [${target.project}]:\n\n${sanitizeScreenText(screen)}`);
+        await this.wechat.reply(msg, [
+          '📺 当前终端界面',
+          this._formatTargetLines(target),
+          '',
+          sanitizeScreenText(screen),
+        ].join('\n'));
       }
     } catch(e) {
-      await this.wechat.reply(msg, `❌ 获取屏幕失败: ${e.message}`);
+      await this.wechat.reply(msg, `❌ 获取终端界面失败\n原因: ${e.message}`);
     }
   }
 
   /** /help */
   async _cmdHelp(msg) {
     await this.wechat.reply(msg, [
-      '📖 cc-wechat 命令：',
+      '📖 cc-wechat 帮助',
       '',
-      '直接发文本 → 注入到当前 CC 会话',
+      '直接发文本',
+      '发送到当前会话。',
+      '当前目标看 /ls。',
       '',
-      '-- 会话 --',
-      '/ls        → 列出活跃会话',
-      '/to N      → 切换到第 N 个会话',
-      '/new [.,N,目录] [任务] → 新开 tab',
-      '/new       → 进入目录选择向导，可逐级选择或创建目录',
-      '/new --trust ... → 新目录信任提示自动确认',
-      '/last      → 查看最后回复',
-      '/screen    → 查看当前终端界面',
+      '会话',
+      '查看: /ls',
+      '切换: /to N',
+      '向导: /new',
+      '新建: /new 目录 任务',
+      '信任: /new --trust',
+      '回复: /last',
+      '屏幕: /screen',
       '',
-      '-- 提问/授权回复 --',
-      '收到提问/授权通知时，优先直接回复数字选择',
-      '多分类问题可回复 [1 3][1][2] 一次提交',
-      '单分类问题也用 [1] 或 [1 3]；/pick 1 3 可手动批量选择',
+      '提问/授权',
+      '单分类: [1] 或 [1 3]',
+      '多分类: [1 3][1][2]',
+      '/pick 1 3 批量勾选',
       '',
-      '-- 按键注入 --',
-      '/up /down  → 上下选择',
-      '/left /right → 左右选择',
-      '/space     → 空格(多选勾选)',
-      '/enter     → 回车确认',
-      '/tab       → Tab 切换',
-      '/perm      → 切换权限模式(Shift+Tab)',
-      '/help      → 本帮助',
+      '按键',
+      '上下: /up /down',
+      '左右: /left /right',
+      '勾选: /space',
+      '确认: /enter',
+      '切换: /tab',
+      '权限: /perm',
+      '帮助: /help',
     ].join('\n'));
   }
 
@@ -481,7 +551,7 @@ export class Bridge {
 
     if (text === '/cancel' || text === '取消') {
       this.pendingTargetChoice = null;
-      await this.wechat.reply(msg, '已取消本次会话选择');
+      await this.wechat.reply(msg, '✅ 已取消本次会话选择。');
       return true;
     }
 
@@ -506,19 +576,31 @@ export class Bridge {
     if (!pending) return false;
 
     if (text.startsWith('/')) {
-      await this.wechat.reply(msg, '⏳ 正在创建新 tab，命令不会排队。请等启动完成后再发送。');
+      await this.wechat.reply(msg, [
+        '⏳ 新 tab 正在启动',
+        `目录: ${pending.cwd}`,
+        '这条命令没有执行。请等启动完成后再发送。',
+      ].join('\n'));
       return true;
     }
 
     if (pending.queued.length >= 10) {
-      await this.wechat.reply(msg, '⏳ 新 tab 仍在启动，暂存消息已达到 10 条；这条没有排队，请稍后重发。');
+      await this.wechat.reply(msg, [
+        '⏳ 新 tab 仍在启动',
+        '暂存消息已达到 10 条，这条没有排队。',
+        '下一步: 稍后重发。',
+      ].join('\n'));
       return true;
     }
 
     pending.queued.push({ text, msg });
     if (!pending.notified) {
       pending.notified = true;
-      await this.wechat.reply(msg, `⏳ 正在创建新 tab，已暂存消息。启动完成后会发送到新会话: ${pending.cwd}`);
+      await this.wechat.reply(msg, [
+        '⏳ 新 tab 正在启动',
+        `目录: ${pending.cwd}`,
+        '已暂存这条消息。启动完成后会发送到新会话。',
+      ].join('\n'));
     }
     return true;
   }
@@ -543,17 +625,22 @@ export class Bridge {
         await new Promise(r => setTimeout(r, 700));
         const screen = await readScreen(pending.pid).catch(() => '');
         this._clearTrustHoldIfResolved(pending.pid, screen, 'enter');
-        await this.wechat.reply(msg, `✅ 已确认信任目录${this._screenSuffix(screen)}`);
+        await this.wechat.reply(msg, [
+          '✅ 已确认目录信任',
+          `目录: ${pending.cwd}`,
+          this._screenSuffix(screen),
+        ].filter(Boolean).join('\n'));
       } catch (e) {
-        await this.wechat.reply(msg, `❌ 确认信任失败: ${e.message}`);
+        await this.wechat.reply(msg, `❌ 确认目录信任失败\n原因: ${e.message}`);
       }
       return true;
     }
 
     await this.wechat.reply(msg, [
-      '⏸️ 新 tab 正在等待 Claude 目录信任确认，这条消息没有发送。',
+      '⏸️ 新 tab 正在等待目录信任确认',
       `目录: ${pending.cwd}`,
-      '信任请发 1、信任 或 /enter；不信任可发 /down 后 /enter，或 /esc。',
+      '这条消息没有发送到 Claude。',
+      '下一步: 信任请发 1、信任 或 /enter；不信任可发 /down 后 /enter，或 /esc。',
     ].join('\n'));
     return true;
   }
@@ -563,7 +650,12 @@ export class Bridge {
 
     if (!drain) {
       const last = launch.queued[launch.queued.length - 1];
-      await this.wechat.reply(last.msg, `⏸️ 新 tab 未进入可直接输入状态（${reason || '未就绪'}），${launch.queued.length} 条暂存消息未发送。请确认后重发。`);
+      await this.wechat.reply(last.msg, [
+        '⏸️ 暂存消息未发送',
+        `原因: ${reason || '新 tab 未就绪'}`,
+        `数量: ${launch.queued.length} 条`,
+        '下一步: 处理完成后请重发。',
+      ].join('\n'));
       return;
     }
 
@@ -581,7 +673,7 @@ export class Bridge {
     for (const item of launch.notifications) {
       this._applyNotifyState(item.data);
       const text = [
-        '🔕 新 tab 启动期间收到通知，已延后推送：',
+        '🔕 启动期间收到一条 Claude 通知，已延后推送',
         '',
         item.text,
       ].filter(Boolean).join('\n');
@@ -608,14 +700,17 @@ export class Bridge {
   }
 
   _formatTargetChoicePrompt(candidates, prefix = '多个会话都有未回复通知，请选择要发送到哪个会话：') {
-    const lines = [`⚠️ ${prefix}`, ''];
+    const lines = ['⚠️ 需要选择目标会话', prefix, ''];
     candidates.forEach((item, index) => {
       const age = Math.max(0, Math.round((Date.now() - item.notifiedAt) / 1000));
-      const source = item.source && item.source !== '.claude' ? ` [${item.source}]` : '';
-      lines.push(`${index + 1}. ${item.project || '未知项目'}${source} (PID:${item.pid}, ${age}s前)`);
+      lines.push(`[${index + 1}] ${item.project || '未知项目'} (${age}s 前)`);
+      lines.push(`目录: ${item.cwd || '未知目录'}`);
+      lines.push(`PID: ${item.pid}`);
+      if (item.source && item.source !== '.claude') lines.push(`来源: ${item.source}`);
+      if (index < candidates.length - 1) lines.push('');
     });
     lines.push('');
-    lines.push('回复序号后，我会把刚才那条消息发送过去。');
+    lines.push('回复序号后，会把刚才那条消息发送到所选会话。发送 /cancel 取消。');
     return lines.join('\n');
   }
 
@@ -624,6 +719,7 @@ export class Bridge {
     const item = {
       pid: data.pid,
       project: data.project || '',
+      cwd: data.cwd || '',
       source: data.source || data.claudeDir?.split(/[/\\]/).pop() || '',
       notifiedAt: now,
       seq: ++this.notificationSeq,
@@ -665,6 +761,7 @@ export class Bridge {
       candidates.push({
         ...session,
         ...item,
+        cwd: item.cwd || session.cwd,
       });
     }
 
@@ -673,6 +770,58 @@ export class Bridge {
 
   _markSessionAnswered(pid) {
     this.pendingNotificationSessions.delete(pid);
+  }
+
+  _noActiveSessionMessage() {
+    return [
+      '⚠️ 当前没有活跃的 Claude Code 会话',
+      '下一步: 发送 /new 创建新 tab，或先在本机启动 Claude Code。',
+    ].join('\n');
+  }
+
+  _formatTargetLines(session) {
+    return [
+      `会话: ${session.project || '未知项目'}`,
+      `目录: ${session.cwd || '未知目录'}`,
+    ].join('\n');
+  }
+
+  _formatSessionListItem(session, index, isCurrent) {
+    const updated = this._formatUpdatedAt(session.updatedAt);
+    const lines = [
+      `[${index}] ${session.project || '未知项目'}`,
+      `目录: ${session.cwd || '未知目录'}`,
+      `PID: ${session.pid}`,
+      this._statusText(session.status),
+    ];
+    if (session.source && session.source !== '.claude') lines.push(`来源: ${session.source}`);
+    if (updated) lines.push(`更新: ${updated}`);
+    return lines;
+  }
+
+  _statusText(status = '') {
+    const s = String(status).toLowerCase();
+    if (s === 'idle') return '状态: 🟢 空闲';
+    if (s === 'busy' || s === 'running') return '状态: 🟡 运行中';
+    if (s === 'error') return '状态: 🔴 异常';
+    return `状态: ⚪ ${status || '未知'}`;
+  }
+
+  _formatUpdatedAt(value) {
+    const n = Number(value);
+    if (!n) return '';
+    const ms = n < 1e12 ? n * 1000 : n;
+    try {
+      return new Date(ms).toLocaleString('zh-CN', {
+        hour12: false,
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+    } catch {
+      return '';
+    }
   }
 
   _parseNewArgs(rawArgs) {
@@ -806,7 +955,7 @@ export class Bridge {
     const s = String(text || '').trim();
     if (s === '/cancel' || s === '取消') {
       this.pendingNewDirGuide = null;
-      await this.wechat.reply(msg, '已取消新建 tab 目录选择');
+      await this.wechat.reply(msg, '✅ 已取消新 tab 目录选择。');
       return true;
     }
 
@@ -815,7 +964,7 @@ export class Bridge {
         try {
           mkdirSync(pending.candidatePath, { recursive: true });
         } catch (e) {
-          await this.wechat.reply(msg, `❌ 创建目录失败: ${e.message}`);
+          await this.wechat.reply(msg, `❌ 创建目录失败\n路径: ${pending.candidatePath}\n原因: ${e.message}`);
           return true;
         }
 
@@ -834,11 +983,11 @@ export class Bridge {
           page: pending.page || 0,
           expiresAt: Date.now() + 3 * 60 * 1000,
         };
-        await this.wechat.reply(msg, this._formatNewDirGuide('已返回目录选择。'));
+        await this.wechat.reply(msg, this._formatNewDirGuide('✅ 已返回目录选择。'));
         return true;
       }
 
-      await this.wechat.reply(msg, this._formatCreateDirPrompt(pending, '请回复 1 创建，或 2 返回。'));
+      await this.wechat.reply(msg, this._formatCreateDirPrompt(pending, '⚠️ 请回复 1 创建，或 2 返回。'));
       return true;
     }
 
@@ -850,7 +999,7 @@ export class Bridge {
 
     if (/^(?:n|next|下一页|下页)$/.test(s)) {
       if (pending.page >= totalPages - 1) {
-        await this.wechat.reply(msg, this._formatNewDirGuide('已经是最后一页。'));
+        await this.wechat.reply(msg, this._formatNewDirGuide('ℹ️ 已经是最后一页。'));
         return true;
       }
       pending.page += 1;
@@ -860,7 +1009,7 @@ export class Bridge {
 
     if (/^(?:p|prev|previous|上一页|上页)$/.test(s)) {
       if (pending.page <= 0) {
-        await this.wechat.reply(msg, this._formatNewDirGuide('已经是第一页。'));
+        await this.wechat.reply(msg, this._formatNewDirGuide('ℹ️ 已经是第一页。'));
         return true;
       }
       pending.page -= 1;
@@ -923,7 +1072,7 @@ export class Bridge {
       return true;
     }
 
-    await this.wechat.reply(msg, this._formatNewDirGuide('请回复序号、0、..，或 c 名称 创建目录。'));
+    await this.wechat.reply(msg, this._formatNewDirGuide('⚠️ 没有识别这条目录选择。请回复序号、0、..，或 c 名称 创建目录。'));
     return true;
   }
 
@@ -955,16 +1104,18 @@ export class Bridge {
     if (pending.autoTrust) lines.push('信任: 启动后自动确认');
     if (totalPages > 1) lines.push(`页码: ${page + 1}/${totalPages}`);
     lines.push('');
-    lines.push('0. 使用当前目录');
-    lines.push(`.. 上一级: ${dirname(pending.currentDir)}`);
+    lines.push('[0] 使用当前目录');
+    lines.push(`.. 返回上一级: ${dirname(pending.currentDir)}`);
     children.forEach((child, index) => {
-      lines.push(`${index + 1}. ${child.name}`);
+      lines.push(`[${index + 1}] ${child.name}`);
     });
     lines.push('');
-    lines.push('回复序号进入子目录；回复 0 使用当前目录。');
-    if (totalPages > 1) lines.push('回复 下一页/上一页 翻页。');
-    lines.push('回复 c 名称 创建子目录，或直接发目录名/路径跳转。');
-    lines.push('发送 /cancel 取消。');
+    lines.push('操作: 序号进入目录。');
+    lines.push('回复 0 使用当前目录。');
+    if (totalPages > 1) lines.push('翻页: 下一页 / 上一页。');
+    lines.push('创建: c 名称。');
+    lines.push('跳转: 直接发目录名或路径。');
+    lines.push('取消: 发送 /cancel。');
     return lines.join('\n');
   }
 
@@ -975,10 +1126,10 @@ export class Bridge {
       `路径: ${pending.candidatePath}`,
       pending.taskDescription ? `任务: ${pending.taskDescription}` : '',
       '',
-      '1. 创建并新开 tab',
-      '2. 返回目录选择',
+      '[1] 创建并新开 tab',
+      '[2] 返回目录选择',
       '',
-      '发送 /cancel 取消。',
+      '取消: 发送 /cancel。',
     ].filter(Boolean).join('\n');
   }
 

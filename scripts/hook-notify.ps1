@@ -246,6 +246,7 @@ try {
         event     = $evt
         action    = $action
         project   = $project
+        cwd       = $cwd
         title     = $title
         prompt    = $lastPrompt
         lastReply = $lastReply

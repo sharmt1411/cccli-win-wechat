@@ -93,7 +93,10 @@ export function hasYesNoPrompt(text = '') {
 export function resolveQuickReply(text, interaction) {
   if (!interaction) return null;
   const choice = String(text).trim();
-  const groups = parseQuestionGroups(choice);
+  const bracketGroups = parseQuestionGroups(choice);
+  const groups = interaction.type === 'ask_user_question'
+    ? (bracketGroups.length ? bracketGroups : parseBareQuestionChoice(choice, interaction))
+    : bracketGroups;
   if (interaction.type === 'ask_user_question' && groups.length) {
     const batch = groups.length === 1
       ? buildSingleQuestionGroupReply(groups[0], interaction)
@@ -424,6 +427,17 @@ function parseQuestionGroups(choice) {
     .filter(group => group.length);
 }
 
+function parseBareQuestionChoice(choice, interaction) {
+  if (interaction?.type !== 'ask_user_question') return [];
+  const choices = parseChoiceList(String(choice).trim());
+  if (choices.length !== 1) return [];
+
+  const selected = choices[0];
+  const exists = [...(interaction.screenOptions || []), ...(interaction.options || [])]
+    .some(option => option.number === selected);
+  return exists ? [choices] : [];
+}
+
 function buildQuestionGroupReply(groups, interaction) {
   const questions = interaction.questions || [];
   if (!questions.length || groups.length > questions.length) return null;
@@ -488,6 +502,16 @@ function buildSingleQuestionGroupReply(choices, interaction) {
 
   if (choices.length !== 1) return null;
   const selected = choices[0];
+  const screenOption = interaction.screenOptions?.find(o => o.number === selected);
+  if (screenOption) {
+    const current = interaction.screenOptions.find(o => o.cursor) || interaction.screenOptions[0];
+    return {
+      mode: 'keys',
+      value: [...navigationKeys(current, screenOption), 'enter'],
+      label: `[${selected}] ${screenOption.label}`,
+    };
+  }
+
   const option = interaction.options?.find(o => o.number === selected);
   if (option) {
     return {
@@ -497,13 +521,7 @@ function buildSingleQuestionGroupReply(choices, interaction) {
     };
   }
 
-  const screenOption = interaction.screenOptions?.find(o => o.number === selected);
-  if (!screenOption) return null;
-  return {
-    mode: 'text',
-    value: selected,
-    label: `[${selected}] ${screenOption.label}`,
-  };
+  return null;
 }
 
 function makeStructuredOptions(question = {}) {
