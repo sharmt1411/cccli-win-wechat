@@ -60,14 +60,14 @@ export class NotifyWatcher {
       const data = JSON.parse(raw);
       await this._enrichScreen(data);
 
-      // 格式化并推送微信
+      // 格式化并推送微信。Bridge 可以选择暂缓推送，例如新 tab 正在启动时。
       const text = this._format(data);
-      await this.wechat.push(text);
+      const routed = this.onNotify?.(data, text);
+      if (routed !== false) {
+        await this.wechat.push(typeof routed === 'string' ? routed : text);
+      }
 
-      // 通知 bridge 更新 lastNotifiedPid
-      this.onNotify?.(data);
-
-      console.log(`📤 通知已推送: ${data.event} [${data.project}]`);
+      console.log(`${routed === false ? '⏸️ 通知已暂缓' : '📤 通知已推送'}: ${data.event} [${data.project}]`);
     } catch (e) {
       console.error('处理通知文件出错:', e.message);
     } finally {

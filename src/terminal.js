@@ -40,20 +40,31 @@ export async function injectInput(pid, text) {
  * @param {string} [opts.claudeDir] - Claude 配置目录（影响 CLAUDE_CONFIG_DIR 环境变量）
  */
 export async function newTab({ cwd, taskDescription, claudeDir }) {
-  const cmd = taskDescription
-    ? `claude "${taskDescription.replace(/"/g, '\\"')}"`
-    : 'claude';
-
   const args = ['new-tab', '-d', cwd];
+  const command = [
+    claudeDir && !claudeDir.endsWith('.claude')
+      ? `$env:CLAUDE_CONFIG_DIR = ${psQuote(claudeDir)}`
+      : '',
+    taskDescription
+      ? `claude ${psQuote(taskDescription)}`
+      : 'claude',
+  ].filter(Boolean).join('; ');
 
-  // 如果指定了非默认 Claude 配置目录，通过环境变量传递
-  if (claudeDir && !claudeDir.endsWith('.claude')) {
-    args.push('cmd', '/c', `set "CLAUDE_CONFIG_DIR=${claudeDir}" && ${cmd}`);
-  } else {
-    args.push('cmd', '/c', cmd);
-  }
+  args.push(
+    'powershell.exe',
+    '-NoExit',
+    '-NoProfile',
+    '-ExecutionPolicy',
+    'Bypass',
+    '-Command',
+    command,
+  );
 
   await execFileAsync('wt.exe', args, { timeout: 10000 });
+}
+
+function psQuote(value) {
+  return `'${String(value).replace(/'/g, "''")}'`;
 }
 
 /**
