@@ -58,6 +58,12 @@ export async function runSetup() {
 
   cfg.claudeDirs = dirs.map(d => d.replace(/\\/g, '/'));
 
+  const awayMode = await ask('\n是否仅在锁屏/息屏时推送和桥接？(y/N): ');
+  cfg.lockScreenMode = {
+    ...(cfg.lockScreenMode || {}),
+    enabled: /^(?:y(?:es)?|是|开启|启用)$/i.test(awayMode.trim()),
+  };
+
   // ── 2. 注入 Hook ──
   console.log('\n📌 注入 Hook...');
   for (const dir of dirs) {

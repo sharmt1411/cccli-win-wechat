@@ -9,6 +9,10 @@ const CONFIG_PATH = join(__dirname, '..', 'config.json');
 const DEFAULTS = {
   claudeDirs: [],
   notifyDir: join(process.env.TEMP || '', 'cc-wechat-notify'),
+  lockScreenMode: {
+    enabled: false,
+    idleGraceSeconds: 5,
+  },
   wechat: {
     botToken: '',
     baseUrl: 'https://ilinkai.weixin.qq.com',
@@ -29,6 +33,7 @@ export function load() {
     const raw = readFileSync(CONFIG_PATH, 'utf-8');
     _config = { ...structuredClone(DEFAULTS), ...JSON.parse(raw) };
     _config.wechat = { ...DEFAULTS.wechat, ...(_config.wechat || {}) };
+    _config.lockScreenMode = { ...DEFAULTS.lockScreenMode, ...(_config.lockScreenMode || {}) };
   } catch {
     _config = structuredClone(DEFAULTS);
   }

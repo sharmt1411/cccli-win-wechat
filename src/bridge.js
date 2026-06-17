@@ -1,8 +1,9 @@
 // bridge.js — 命令路由：解析微信命令 → 调度执行
 import { SessionManager } from './session.js';
 import { injectInput, newTab, injectKey, readScreen } from './terminal.js';
-import { get as getConfig } from './config.js';
+import { get as getConfig, save as saveConfig } from './config.js';
 import { normalizeInteraction, resolveQuickReply, sanitizeScreenText } from './interaction.js';
+import { formatPresenceState, getPresenceState, shouldOperateByPresence } from './presence.js';
 import { existsSync, mkdirSync, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, resolve } from 'node:path';
@@ -63,6 +64,8 @@ export class Bridge {
   async handleMessage(msg) {
     const text = msg.item_list?.[0]?.text_item?.text?.trim();
     if (!text) return;
+
+    if (await this._pauseForPresenceMode(text, msg)) return;
 
     if (this.pendingNewTabLaunch) {
       const handled = await this._handlePendingNewTabLaunch(text, msg);
@@ -192,6 +195,9 @@ export class Bridge {
         return this._cmdScreen(msg);
       case '/help':
         return this._cmdHelp(msg);
+      case '/away':
+      case '/lockmode':
+        return this._cmdAwayMode(parts.slice(1), msg);
       default:
         await this.wechat.reply(msg, `❓ 未知命令: ${cmd}\n\n发送 /help 查看可用命令。`);
     }
@@ -524,6 +530,11 @@ export class Bridge {
       '回复: /last',
       '屏幕: /screen',
       '',
+      '生效模式',
+      '查看: /away',
+      '仅离开: /away on',
+      '始终: /away off',
+      '',
       '提问/授权',
       '单分类: [1] 或 [1 3]',
       '多分类: [1 3][1][2]',
@@ -537,6 +548,53 @@ export class Bridge {
       '切换: /tab',
       '权限: /perm',
       '帮助: /help',
+    ].join('\n'));
+  }
+
+  async _cmdAwayMode(args, msg) {
+    const cfg = getConfig();
+    const current = {
+      ...(cfg.lockScreenMode || {}),
+      enabled: Boolean(cfg.lockScreenMode?.enabled),
+    };
+    const action = String(args[0] || 'status').toLowerCase();
+
+    if (['on', '1', 'true', '开启', '打开', '启用'].includes(action)) {
+      saveConfig({ lockScreenMode: { ...current, enabled: true } });
+      const state = await getPresenceState(getConfig());
+      await this.wechat.reply(msg, [
+        '✅ 已开启离开生效模式',
+        '仅锁屏/息屏时推送和桥接。',
+        `当前电脑: ${formatPresenceState(state)}`,
+        this._formatPresenceDetail(state),
+      ].join('\n'));
+      return;
+    }
+
+    if (['off', '0', 'false', '关闭', '停用'].includes(action)) {
+      saveConfig({ lockScreenMode: { ...current, enabled: false } });
+      const state = await getPresenceState(getConfig());
+      await this.wechat.reply(msg, [
+        '✅ 已关闭离开生效模式',
+        '现在始终推送和桥接。',
+        `当前电脑: ${formatPresenceState(state)}`,
+        this._formatPresenceDetail(state),
+      ].join('\n'));
+      return;
+    }
+
+    const state = await getPresenceState(cfg);
+    await this.wechat.reply(msg, [
+      '🖥️ 离开生效模式',
+      `模式: ${current.enabled ? '开启' : '关闭'}`,
+      `当前电脑: ${formatPresenceState(state)}`,
+      this._formatPresenceDetail(state),
+      current.enabled
+        ? '效果: 仅锁屏/息屏时工作。'
+        : '效果: 始终工作。',
+      '',
+      '开启: /away on',
+      '关闭: /away off',
     ].join('\n'));
   }
 
@@ -568,6 +626,24 @@ export class Bridge {
       targetPid: selected.pid,
       skipDisambiguation: true,
     });
+    return true;
+  }
+
+  async _pauseForPresenceMode(text, msg) {
+    const cmd = String(text || '').trim().split(/\s+/)[0]?.toLowerCase();
+    if (cmd === '/away' || cmd === '/lockmode' || cmd === '/help') return false;
+
+    const gate = await shouldOperateByPresence();
+    if (gate.allowed) return false;
+
+    await this.wechat.reply(msg, [
+      '⏸️ 当前未锁屏/息屏',
+      '离开生效模式已开启。',
+      '这条消息没有发送到 Claude。',
+      `当前电脑: ${formatPresenceState(gate.state)}`,
+      '',
+      '关闭模式: /away off',
+    ].join('\n'));
     return true;
   }
 
@@ -770,6 +846,15 @@ export class Bridge {
 
   _markSessionAnswered(pid) {
     this.pendingNotificationSessions.delete(pid);
+  }
+
+  _formatPresenceDetail(state) {
+    if (!state) return '';
+    const parts = [];
+    if (state.wtsOk) parts.push(`WTS=${state.sessionFlags}`);
+    if (state.desktopName) parts.push(`桌面=${state.desktopName}`);
+    if (state.displayTimeoutSeconds) parts.push(`息屏=${state.displayTimeoutSeconds}s`);
+    return parts.length ? `检测: ${parts.join(' ')}` : '';
   }
 
   _noActiveSessionMessage() {

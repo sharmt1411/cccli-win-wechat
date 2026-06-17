@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { get as getConfig } from './config.js';
 import { normalizeInteraction, sanitizeScreenText, truncateText } from './interaction.js';
 import { readScreen } from './terminal.js';
+import { formatPresenceState, shouldOperateByPresence } from './presence.js';
 
 export class NotifyWatcher {
   /**
@@ -58,6 +59,13 @@ export class NotifyWatcher {
       if (!existsSync(filePath)) return;
       const raw = readFileSync(filePath, 'utf-8');
       const data = JSON.parse(raw);
+
+      const gate = await shouldOperateByPresence();
+      if (!gate.allowed) {
+        console.log(`🔕 当前未锁屏/息屏，通知未推送: ${data.event} [${data.project}] state=${formatPresenceState(gate.state)}`);
+        return;
+      }
+
       await this._enrichScreen(data);
       const interaction = normalizeInteraction(data);
       if (isGenericWaitingNotification(data, interaction)) {
@@ -67,7 +75,7 @@ export class NotifyWatcher {
 
       // 格式化并推送微信。Bridge 可以选择暂缓推送，例如新 tab 正在启动时。
       const text = this._format(data, interaction);
-      const routed = this.onNotify?.(data, text);
+      const routed = await this.onNotify?.(data, text);
       if (routed !== false) {
         await this.wechat.push(typeof routed === 'string' ? routed : text);
       }
