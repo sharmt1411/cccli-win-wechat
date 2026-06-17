@@ -1,6 +1,8 @@
 // wechat.js — iLink Bot API 协议封装
 import { saveWechat, get as getConfig } from './config.js';
 
+import { EventEmitter } from 'node:events';
+
 function randomUin() {
   const n = (Math.random() * 0xFFFFFFFF) >>> 0;
   return Buffer.from(String(n)).toString('base64');
@@ -16,8 +18,9 @@ function headers(token) {
   return h;
 }
 
-export class WeChatBot {
+export class WeChatBot extends EventEmitter {
   constructor() {
+    super();
     const cfg = getConfig().wechat;
     this.baseUrl = cfg.baseUrl || 'https://ilinkai.weixin.qq.com';
     this.token = cfg.botToken || '';
@@ -61,28 +64,18 @@ export class WeChatBot {
 
   async login() {
     const qr = await this.getQrCode();
-    // 动态 import qrcode-terminal（仅登录时用）
-    const qrt = await import('qrcode-terminal');
 
-    // 尝试多种可能的 URL 字段
-    const qrUrl = qr.url || qr.qrcode_url || qr.qrcode_img_url;
-    if (qrUrl) {
-      qrt.default.generate(qrUrl, { small: true });
-    } else if (qr.qrcode_img_content) {
-      // 如果是 base64 图片，提示用户手动扫码
-      console.log('请用微信扫描以下二维码（base64 图片，保存后扫码）：');
-      console.log(qr.qrcode_img_content.substring(0, 200) + '...');
-    } else {
-      console.log('二维码数据：', JSON.stringify(qr, null, 2));
-    }
+    // 触发 qrcode 事件，交由外部（GUI 或 CLI）处理
+    this.emit('qrcode', qr);
 
-    console.log('\n等待微信扫码...');
     const qrId = qr.qrcode;
 
     while (true) {
       await sleep(1500);
       try {
         const status = await this.getQrCodeStatus(qrId);
+        this.emit('qrcode-status', status);
+
         if (status.status === 'confirmed' || status.bot_token) {
           this.token = status.bot_token;
           if (status.baseurl) this.baseUrl = status.baseurl;
@@ -90,10 +83,11 @@ export class WeChatBot {
             botToken: this.token,
             baseUrl: this.baseUrl,
           });
-          console.log('✅ 登录成功');
+          this.emit('login');
           return;
         }
         if (status.status === 'expired') {
+          this.emit('qrcode-expired');
           throw new Error('二维码已过期，请重新运行');
         }
       } catch (e) {

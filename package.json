@@ -3,12 +3,42 @@
   "version": "1.0.0",
   "type": "module",
   "description": "通过微信远程控制 Claude Code CLI",
-  "main": "src/index.js",
+  "main": "main.js",
   "scripts": {
     "start": "node src/index.js",
-    "setup": "node src/index.js --setup"
+    "app": "electron .",
+    "setup": "node src/index.js --setup",
+    "pack": "electron-builder --dir",
+    "build": "electron-builder"
+  },
+  "build": {
+    "appId": "com.cc-wechat.app",
+    "productName": "cc-wechat",
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "ui/**/*",
+      "src/**/*",
+      "config.json",
+      "node_modules/**/*"
+    ]
   },
   "dependencies": {
+    "qrcode": "^1.5.4",
     "qrcode-terminal": "^0.12.0"
+  },
+  "devDependencies": {
+    "electron": "^42.4.1",
+    "electron-builder": "^26.15.3"
   }
 }

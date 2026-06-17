@@ -75,6 +75,24 @@ export async function runSetup() {
   saveConfig();
 
   const bot = new WeChatBot();
+  bot.on('qrcode', async (qr) => {
+    const qrt = await import('qrcode-terminal');
+    const qrUrl = qr.url || qr.qrcode_url || qr.qrcode_img_url;
+    if (qrUrl) {
+      qrt.default.generate(qrUrl, { small: true });
+    } else if (qr.qrcode_img_content) {
+      console.log('请用微信扫描以下二维码（base64 图片，保存后扫码）：');
+      console.log(qr.qrcode_img_content.substring(0, 200) + '...');
+    } else {
+      console.log('二维码数据：', JSON.stringify(qr, null, 2));
+    }
+    console.log('\n等待微信扫码...');
+  });
+  
+  bot.on('login', () => {
+    console.log('✅ 登录成功');
+  });
+
   await bot.login();
 
   saveConfig();
