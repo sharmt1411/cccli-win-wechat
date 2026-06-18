@@ -19,7 +19,7 @@ const DEFAULTS = {
   claudeDirs: [],
   botAlias: 'Claude',
   terminalCommand: 'claude',
-  notifyDir: join(process.env.TEMP || '', 'cc-wechat-notify'),
+  notifyDir: './cc-wechat-notify',
   lockScreenMode: {
     enabled: false,
     idleGraceSeconds: 5,
