@@ -47,6 +47,7 @@ export async function injectInput(pid, text) {
       if (out.startsWith('ok:')) return resolve(out);
       reject(new Error(`inject error: ${out}`));
     });
+    ps.stdin.on('error', (e) => reject(new Error(`inject stdin failed: ${e.message}`)));
     ps.stdin.write(text);
     ps.stdin.end();
   });

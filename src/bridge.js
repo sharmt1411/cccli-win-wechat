@@ -380,6 +380,8 @@ export class Bridge {
       return;
     }
     this.currentTarget = list[idx].pid;
+    // 同步 lastNotifiedPid，否则 _resolveTarget 会因其优先级更高而让本次 /to 失效。
+    this.lastNotifiedPid = list[idx].pid;
     const s = list[idx];
     await this.wechat.reply(msg, [
       '✅ 已切换目标会话',
@@ -1252,9 +1254,8 @@ export class Bridge {
     if (value === '.') return baseCwd;
     if (value === '~') return homedir();
 
-    const looksLikePath = this._looksLikeDirectoryArg(value);
     const candidate = this._resolvePathArg(value, baseCwd);
-    if ((looksLikePath || this._isDirectory(candidate)) && this._isDirectory(candidate)) {
+    if (this._isDirectory(candidate)) {
       return candidate;
     }
     return null;

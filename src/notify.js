@@ -171,7 +171,9 @@ export class NotifyWatcher {
       if (cleanReply) {
         lines.push('');
         lines.push('Claude 最近回复:');
-        lines.push(truncateText(cleanReply, 600));
+        // Stop（执行完成）的最终回复完整发送，由 wechat.send 的 splitText 自动分条；
+        // 仅 Notification 场景做 600 字截断（界面信息为主）。
+        lines.push(isNotif ? truncateText(cleanReply, 600) : cleanReply);
       }
     }
 

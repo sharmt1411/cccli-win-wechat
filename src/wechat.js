@@ -229,7 +229,7 @@ export class WeChatBot extends EventEmitter {
     let resultText = String(text);
     const alias = getConfig().botAlias || 'Claude';
     if (alias && alias.toLowerCase() !== 'claude') {
-      resultText = resultText.replace(/Claude Code/gi, alias).replace(/Claude/gi, alias);
+      resultText = resultText.replace(/Claude Code|Claude/gi, alias);
     }
     const chunks = splitText(resultText, 2000);
     for (const chunk of chunks) {
@@ -802,10 +802,12 @@ function extensionFromMime(mime) {
 }
 
 function splitText(text, maxLen) {
-  if (text.length <= maxLen) return [text];
+  // 按 Unicode 码点切分，避免在 emoji/代理对中间截断产生乱码。
+  const chars = Array.from(String(text));
+  if (chars.length <= maxLen) return [String(text)];
   const chunks = [];
-  for (let i = 0; i < text.length; i += maxLen) {
-    chunks.push(text.substring(i, i + maxLen));
+  for (let i = 0; i < chars.length; i += maxLen) {
+    chunks.push(chars.slice(i, i + maxLen).join(''));
   }
   return chunks;
 }
