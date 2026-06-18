@@ -76,7 +76,7 @@ export class NotifyWatcher {
 
       await this._enrichScreen(data);
       const interaction = normalizeInteraction(data);
-      if (isGenericWaitingNotification(data, interaction)) {
+      if (isGenericWaitingNotification(data)) {
         console.log(`🔇 通用等待通知已忽略: ${data.event} [${data.project}]`);
         return;
       }
@@ -505,9 +505,13 @@ function formatSessionMeta(d) {
   return lines;
 }
 
-function isGenericWaitingNotification(data, interaction) {
-  if (data.event !== 'Notification' || interaction) return false;
-  return isGenericWaitingAction(data.action || data.message || data.prompt);
+function isGenericWaitingNotification(data) {
+  if (data.event !== 'Notification') return false;
+  if (!isGenericWaitingAction(data.action || data.message || data.prompt)) return false;
+  // “等待输入”是无实质内容的 idle 提示。只有来自 transcript 的可靠交互(data.interaction，
+  // 如 AskUserQuestion / 权限请求)才保留通知；屏幕推断的交互(inferScreenInteraction 可能把
+  // 终端历史里的数字/Y-N 误判为菜单)不应让它绕过过滤。
+  return !data.interaction;
 }
 
 function shouldShowAction(action) {
@@ -520,10 +524,11 @@ function shouldShowAction(action) {
 
 function isGenericWaitingAction(value) {
   const text = normalizeForCompare(value);
-  return text === 'claudeiswaitingforyourinput'
-    || text === 'waitingforyourinput'
-    || text === '等待输入'
-    || text === '正在等待输入';
+  if (!text) return false;
+  // 用 includes 而非全等：别名替换（如 Claude→cola）或 "Claude Code is waiting…" 等前缀
+  // 变体不应导致漏判。归一化后含 "waitingforyourinput" 子串即判为通用等待提示。
+  return text.includes('waitingforyourinput')
+    || text.includes('等待输入');
 }
 
 function shouldShowPrompt(prompt, interaction) {
