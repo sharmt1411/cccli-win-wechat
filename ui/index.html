@@ -181,6 +181,19 @@
     .form-checkbox input {
       margin-right: 8px;
     }
+    .form-section {
+      padding-top: 4px;
+      margin-bottom: 8px;
+      font-size: 12px;
+      font-weight: bold;
+      color: var(--gray);
+    }
+    .form-help {
+      margin-top: 6px;
+      font-size: 12px;
+      line-height: 1.4;
+      color: var(--gray);
+    }
     .btn {
       padding: 8px 16px;
       background-color: var(--accent);
@@ -243,6 +256,14 @@
           开机自启
         </label>
       </div>
+      <div class="form-section">能力</div>
+      <div class="form-group">
+        <label class="form-checkbox">
+          <input type="checkbox" id="cfg-capability-sendFile" />
+          注入发送文件能力
+        </label>
+        <div class="form-help">普通微信文本会按需附加精简上下文，让 Claude 知道可用 cc-wechat-send 块申请发送文件。</div>
+      </div>
       <button class="btn" id="save-settings-btn">保存配置</button>
       <button class="btn" id="logout-btn" style="background-color: #ff4d4f; margin-top: 20px;">解除当前微信绑定</button>
     </div>
@@ -259,6 +280,7 @@
     const panelSettings = document.getElementById('panel-settings');
 
     let isSettingsOpen = false;
+    let currentConfig = {};
     let mainPanelObj = panelQr; // 记录是从二维码还是运行状态切过去的
 
     closeBtn.addEventListener('click', () => {
@@ -286,11 +308,13 @@
 
         // 加载配置
         const config = await window.electronAPI.getConfig();
+        currentConfig = config || {};
         const autoStart = await window.electronAPI.getAutoStart();
         
         document.getElementById('cfg-claudeDirs').value = (config.claudeDirs || []).join(',');
         document.getElementById('cfg-lockScreenMode').checked = config.lockScreenMode?.enabled || false;
         document.getElementById('cfg-autoStart').checked = autoStart;
+        document.getElementById('cfg-capability-sendFile').checked = config.capabilityInjection?.capabilities?.sendFile || false;
       } else {
         // 返回主视图
         panelSettings.classList.add('hidden');
@@ -304,10 +328,19 @@
       const dirs = dirsInput.split(',').map(s => s.trim().replace(/\\/g, '/')).filter(Boolean);
       const lockScreenEnabled = document.getElementById('cfg-lockScreenMode').checked;
       const autoStart = document.getElementById('cfg-autoStart').checked;
+      const sendFileCapability = document.getElementById('cfg-capability-sendFile').checked;
+      const capabilityInjection = currentConfig.capabilityInjection || {};
 
       await window.electronAPI.saveConfig({
         claudeDirs: dirs,
-        lockScreenMode: { enabled: lockScreenEnabled, idleGraceSeconds: 5 }
+        lockScreenMode: { enabled: lockScreenEnabled, idleGraceSeconds: 5 },
+        capabilityInjection: {
+          ...capabilityInjection,
+          capabilities: {
+            ...(capabilityInjection.capabilities || {}),
+            sendFile: sendFileCapability,
+          },
+        },
       });
       await window.electronAPI.setAutoStart(autoStart);
       

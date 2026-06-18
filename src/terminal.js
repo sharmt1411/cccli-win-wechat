@@ -12,7 +12,7 @@ const INJECT_SCRIPT = join(__dirname, '..', 'scripts', 'inject.ps1');
 /**
  * 向目标 CC 会话注入文本输入
  * @param {number} pid - 目标进程 PID
- * @param {string} text - 要注入的文本（支持多行，行间用 Shift+Enter）
+ * @param {string} text - 要注入的文本（支持多行，行间用 Ctrl+Enter）
  */
 export async function injectInput(pid, text) {
   // 通过 stdin 传递文本，避免 shell 转义问题

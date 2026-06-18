@@ -1,6 +1,6 @@
 // notify.js — 监听 hook 通知文件 → 推送微信
-import { watch, readdirSync, readFileSync, unlinkSync, existsSync, mkdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { watch, readdirSync, readFileSync, unlinkSync, existsSync, mkdirSync, statSync, realpathSync } from 'node:fs';
+import { basename, isAbsolute, join, relative, resolve } from 'node:path';
 import { get as getConfig } from './config.js';
 import { normalizeInteraction, sanitizeScreenText, truncateText } from './interaction.js';
 import { readScreen } from './terminal.js';
@@ -60,6 +60,8 @@ export class NotifyWatcher {
       if (!existsSync(filePath)) return;
       const raw = readFileSync(filePath, 'utf-8');
       const data = JSON.parse(raw);
+      data.prompt = stripCcWechatContext(data.prompt);
+      data.lastReply = stripCcWechatContext(data.lastReply);
       if (data.entrypoint && !isCliSession(data)) {
         console.log(`🚫 非 CLI 会话通知已忽略: ${data.event} [${data.project}] entrypoint=${data.entrypoint}`);
         return;
@@ -78,11 +80,19 @@ export class NotifyWatcher {
         return;
       }
 
+      const sendRequests = collectSendRequests(data);
+      if (sendRequests.length) {
+        data.lastReply = stripSendDirectives(data.lastReply);
+      }
+
       // 格式化并推送微信。Bridge 可以选择暂缓推送，例如新 tab 正在启动时。
       const text = this._format(data, interaction);
       const routed = await this.onNotify?.(data, text);
       if (routed !== false) {
         await this.wechat.push(typeof routed === 'string' ? routed : text);
+        if (sendRequests.length) {
+          await this._sendRequestedFiles(data, sendRequests);
+        }
       }
 
       console.log(`${routed === false ? '⏸️ 通知已暂缓' : '📤 通知已推送'}: ${data.event} [${data.project}]`);
@@ -113,6 +123,28 @@ export class NotifyWatcher {
       } catch {
         return;
       }
+    }
+  }
+
+  async _sendRequestedFiles(data, requests) {
+    if (!isSendFileCapabilityEnabled()) {
+      await this.wechat.push('⚠️ Claude 请求发送文件，但“注入发送文件能力”未开启，已忽略。');
+      return;
+    }
+
+    const results = [];
+    for (const request of requests) {
+      try {
+        const file = validateSendFileRequest(data, request);
+        await this.wechat.pushFile(file.path, { caption: file.caption });
+        results.push(`✅ 已发送文件: ${file.name}`);
+      } catch (e) {
+        results.push(`❌ 文件发送失败: ${e.message}`);
+      }
+    }
+
+    if (results.length) {
+      await this.wechat.push(results.join('\n'));
     }
   }
 
@@ -157,6 +189,193 @@ export class NotifyWatcher {
 
     return lines.join('\n');
   }
+}
+
+const MAX_SEND_FILE_BYTES = 20 * 1024 * 1024;
+const SEND_BLOCK_PATTERN = /```cc-wechat-send\s*([\s\S]*?)\s*```/gi;
+const JSON_BLOCK_PATTERN = /```(?:json)?\s*([\s\S]*?)\s*```/gi;
+const CC_WECHAT_CONTEXT_PATTERN = /\s*<cc-wechat-context\b[^>]*>[\s\S]*?<\/cc-wechat-context>\s*/gi;
+
+function collectSendRequests(data = {}) {
+  if (data.event === 'Notification') return [];
+
+  const blocks = [];
+  const directives = Array.isArray(data.sendDirectives)
+    ? data.sendDirectives
+    : (data.sendDirectives ? [data.sendDirectives] : []);
+
+  for (const directive of directives) {
+    if (directive) blocks.push({ body: String(directive).trim(), strict: true });
+  }
+
+  const lastReply = stripCcWechatContext(data.lastReply || '');
+
+  if (!blocks.length) {
+    for (const match of lastReply.matchAll(sendBlockRegex())) {
+      if (match[1]) blocks.push({ body: match[1].trim(), strict: true });
+    }
+  }
+
+  if (!blocks.length) {
+    for (const match of lastReply.matchAll(jsonBlockRegex())) {
+      if (match[1]) blocks.push({ body: match[1].trim(), strict: false });
+    }
+  }
+
+  if (!blocks.length) {
+    const rawJson = extractWholeJsonDirective(lastReply);
+    if (rawJson) {
+      blocks.push({ body: rawJson, strict: false });
+    }
+  }
+
+  const requests = [];
+  for (const block of blocks) {
+    try {
+      const value = JSON.parse(block.body);
+      if (!block.strict && !looksLikeSendDirective(value)) continue;
+      requests.push(...normalizeSendDirective(value));
+    } catch (e) {
+      if (block.strict) {
+      requests.push({ error: `cc-wechat-send JSON 解析失败: ${e.message}` });
+      }
+    }
+  }
+  return requests;
+}
+
+function normalizeSendDirective(value) {
+  const root = Array.isArray(value) ? { files: value } : value;
+  if (!root || typeof root !== 'object') {
+    return [{ error: 'cc-wechat-send 内容必须是 JSON 对象' }];
+  }
+
+  const files = Array.isArray(root.files)
+    ? root.files
+    : (root.path ? [root] : []);
+  if (!files.length) return [{ error: 'cc-wechat-send 缺少 files 数组' }];
+
+  return files.map(item => {
+    if (typeof item === 'string') return { path: item, caption: '' };
+    if (!item || typeof item !== 'object') return { error: 'files 项必须是字符串或对象' };
+    return {
+      path: String(item.path || '').trim(),
+      caption: String(item.caption || '').trim(),
+    };
+  });
+}
+
+function stripSendDirectives(text = '') {
+  let output = stripCcWechatContext(text);
+  output = output.replace(sendBlockRegex(), '').trim();
+  output = output.replace(jsonBlockRegex(), (full, body) => {
+    try {
+      return looksLikeSendDirective(JSON.parse(body)) ? '' : full;
+    } catch {
+      return full;
+    }
+  }).trim();
+
+  const rawJson = extractWholeJsonDirective(output);
+  if (rawJson) {
+    try {
+      if (looksLikeSendDirective(JSON.parse(rawJson))) return '';
+    } catch {}
+  }
+
+  return output.trim();
+}
+
+function sendBlockRegex() {
+  return new RegExp(SEND_BLOCK_PATTERN.source, SEND_BLOCK_PATTERN.flags);
+}
+
+function jsonBlockRegex() {
+  return new RegExp(JSON_BLOCK_PATTERN.source, JSON_BLOCK_PATTERN.flags);
+}
+
+function stripCcWechatContext(text = '') {
+  return String(text || '').replace(contextRegex(), '').trim();
+}
+
+function contextRegex() {
+  return new RegExp(CC_WECHAT_CONTEXT_PATTERN.source, CC_WECHAT_CONTEXT_PATTERN.flags);
+}
+
+function extractWholeJsonDirective(text = '') {
+  const trimmed = String(text || '').trim();
+  if (!trimmed || !/^[{[]/.test(trimmed)) return '';
+  return trimmed;
+}
+
+function looksLikeSendDirective(value) {
+  if (!value || typeof value !== 'object') return false;
+  if (Array.isArray(value)) {
+    return value.some(item => typeof item === 'string' || Boolean(item?.path));
+  }
+  return Array.isArray(value.files) || typeof value.path === 'string';
+}
+
+function validateSendFileRequest(data, request) {
+  if (request.error) throw new Error(request.error);
+  if (!request.path) throw new Error('缺少文件路径');
+
+  const baseDir = data.cwd || process.cwd();
+  const baseReal = realpathSync(baseDir);
+  const candidate = isAbsolute(request.path)
+    ? request.path
+    : resolve(baseReal, request.path);
+  const fileReal = realpathSync(candidate);
+
+  if (!isInsidePath(baseReal, fileReal)) {
+    throw new Error(`路径不在会话目录内: ${request.path}`);
+  }
+
+  if (isBlockedSensitivePath(baseReal, fileReal)) {
+    throw new Error(`安全策略阻止发送: ${request.path}`);
+  }
+
+  const stat = statSync(fileReal);
+  if (!stat.isFile()) throw new Error(`不是文件: ${request.path}`);
+  if (stat.size <= 0) throw new Error(`文件为空: ${request.path}`);
+  if (stat.size > MAX_SEND_FILE_BYTES) {
+    throw new Error(`文件过大: ${basename(fileReal)} (${formatBytes(stat.size)} > ${formatBytes(MAX_SEND_FILE_BYTES)})`);
+  }
+
+  return {
+    path: fileReal,
+    name: basename(fileReal),
+    caption: request.caption.slice(0, 300),
+  };
+}
+
+function isSendFileCapabilityEnabled() {
+  const cfg = getConfig().capabilityInjection;
+  return Boolean(cfg?.enabled !== false && cfg?.capabilities?.sendFile);
+}
+
+function isInsidePath(base, target) {
+  const rel = relative(base, target);
+  return rel === '' || (!!rel && !rel.startsWith('..') && !isAbsolute(rel));
+}
+
+function isBlockedSensitivePath(base, target) {
+  const segments = relative(base, target).split(/[\\/]+/).map(s => s.toLowerCase());
+  if (segments.some(s => ['.git', '.ssh', '.claude', '.codex'].includes(s))) return true;
+
+  const name = basename(target).toLowerCase();
+  return name === 'config.json'
+    || name === '.env'
+    || name.startsWith('.env.')
+    || name === 'id_rsa'
+    || name === 'id_ed25519'
+    || /\.(pem|key|p12|pfx|kdbx)$/i.test(name);
+}
+
+function formatBytes(bytes) {
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
 }
 
 function formatInteraction(interaction) {

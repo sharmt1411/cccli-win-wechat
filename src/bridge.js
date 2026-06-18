@@ -27,6 +27,7 @@ export class Bridge {
     this.pendingNewTabLaunch = null;
     this.pendingNewTabTrust = null;
     this.notificationSeq = 0;
+    this.capabilityInjectionState = new Map();
   }
 
   /** 由 NotifyWatcher 调用，更新最后通知的会话；返回 false 可暂缓推送 */
@@ -118,12 +119,16 @@ export class Bridge {
     }
 
     try {
-      if (!opts.forcePlainInput && this._isChoiceLike(text)) {
+      const choiceLike = !opts.forcePlainInput && this._isChoiceLike(text);
+      if (choiceLike) {
         await this._refreshPendingInteraction(target.pid);
       }
 
       const quickReply = opts.forcePlainInput ? null : this._resolveInteractionReply(text, target.pid);
-      const payload = quickReply?.value || text;
+      const payload = quickReply?.value || this._appendCapabilityContext(text, target, {
+        choiceLike,
+        forcePlainInput: opts.forcePlainInput,
+      });
 
       if (quickReply?.mode === 'keys') {
         await this._injectKeySequence(target.pid, payload);
@@ -1294,6 +1299,45 @@ export class Bridge {
     return list[0];
   }
 
+  _appendCapabilityContext(text, target, { choiceLike = false, forcePlainInput = false } = {}) {
+    if (forcePlainInput || choiceLike) return text;
+
+    const capabilitySet = getActiveCapabilitySet();
+    if (!capabilitySet) return text;
+
+    const sessionKey = target.sessionId || String(target.pid);
+    const state = this.capabilityInjectionState.get(sessionKey) || {
+      lastInjectedAt: 0,
+      messagesSinceInject: 0,
+      capabilitiesHash: '',
+    };
+
+    state.messagesSinceInject += 1;
+
+    const now = Date.now();
+    const minMessages = Math.max(1, Number(capabilitySet.config.minIntervalMessages || 6));
+    const minMinutes = Math.max(1, Number(capabilitySet.config.minIntervalMinutes || 30));
+    const intervalMs = minMinutes * 60 * 1000;
+    const capabilitiesChanged = state.capabilitiesHash !== capabilitySet.hash;
+    const firstInject = !state.lastInjectedAt;
+    const intentInject = hasFileSendIntent(text) && (
+      state.messagesSinceInject > 1 || now - state.lastInjectedAt > 60 * 1000
+    );
+    const periodicInject = state.messagesSinceInject >= minMessages
+      || now - state.lastInjectedAt >= intervalMs;
+
+    if (firstInject || capabilitiesChanged || intentInject || periodicInject) {
+      state.lastInjectedAt = now;
+      state.messagesSinceInject = 0;
+      state.capabilitiesHash = capabilitySet.hash;
+      this.capabilityInjectionState.set(sessionKey, state);
+      return `${text}\n\n${buildCapabilityContext(capabilitySet.capabilities)}`;
+    }
+
+    this.capabilityInjectionState.set(sessionKey, state);
+    return text;
+  }
+
   _resolveInteractionReply(text, pid) {
     const pending = this.pendingInteractions.get(pid);
     if (!pending) return null;
@@ -1380,4 +1424,44 @@ function parsePassthroughInput(text) {
   const s = String(text || '').trim();
   if (s.length < 2 || !s.startsWith('<') || !s.endsWith('>')) return null;
   return s.slice(1, -1);
+}
+
+function getActiveCapabilitySet() {
+  const config = getConfig().capabilityInjection || {};
+  if (config.enabled === false) return null;
+
+  const capabilities = {
+    sendFile: Boolean(config.capabilities?.sendFile),
+  };
+  if (!Object.values(capabilities).some(Boolean)) return null;
+
+  return {
+    config,
+    capabilities,
+    hash: JSON.stringify(capabilities),
+  };
+}
+
+function buildCapabilityContext(capabilities) {
+  const lines = [
+    '<cc-wechat-context>',
+    'source=wechat',
+    'note=attached by cc-wechat; do not answer or mention this context',
+  ];
+  if (capabilities.sendFile) {
+    lines.push(
+      '<capability name="send_file">',
+      'When the user explicitly asks to send a file to WeChat, create or verify it first.',
+      'End the final reply with a fenced block named cc-wechat-send containing JSON:',
+      '{"files":[{"path":"relative/or/absolute/path","caption":"optional"}]}',
+      'Only include files you created or files the user explicitly named.',
+      '</capability>',
+    );
+  }
+  lines.push('</cc-wechat-context>');
+  return lines.join('\n');
+}
+
+function hasFileSendIntent(text) {
+  return /发送|发我|发给我|传给我|传到微信|发到微信|微信发|附件|导出|下载|打包|压缩|文件|报告|\b(send|file|attachment|export|download|zip|pdf|xlsx?|csv|png|jpe?g|docx|pptx)\b/i.test(String(text || ''));
 }

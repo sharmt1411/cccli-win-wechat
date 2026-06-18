@@ -1,7 +1,7 @@
 # inject.ps1 — AttachConsole + WriteConsoleInput 注入键盘事件到目标 CC 进程
 # 用法：
 #   echo "要注入的文本" | powershell -File inject.ps1 -TargetPid 12345
-#   powershell -File inject.ps1 -TargetPid 12345 -ShiftTab
+#   powershell -File inject.ps1 -TargetPid 12345 -Key shifttab
 param(
     [Parameter(Mandatory)][int]$TargetPid,
     [string]$Key
@@ -14,6 +14,7 @@ using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.IO;
+using System.Threading;
 
 public class ConsoleInjector
 {
@@ -49,6 +50,7 @@ public class ConsoleInjector
     const short KEY_EVENT = 1;
     const short VK_RETURN = 0x0D;
     const short VK_SHIFT  = 0x10;
+    const short VK_CONTROL = 0x11;
     const short VK_TAB    = 0x09;
     const short VK_SPACE  = 0x20;
     const short VK_UP     = 0x26;
@@ -57,6 +59,7 @@ public class ConsoleInjector
     const short VK_RIGHT  = 0x27;
     const short VK_ESCAPE = 0x1B;
     const int SHIFT_PRESSED = 0x0010;
+    const int LEFT_CTRL_PRESSED = 0x0008;
 
     [StructLayout(LayoutKind.Explicit)]
     public struct INPUT_RECORD
@@ -88,6 +91,39 @@ public class ConsoleInjector
         return r;
     }
 
+    static bool WriteAllConsoleInput(IntPtr h, INPUT_RECORD[] records, out int totalWritten, out string error)
+    {
+        totalWritten = 0;
+        error = "";
+        int offset = 0;
+        const int batchSize = 64;
+
+        while (offset < records.Length)
+        {
+            int len = Math.Min(batchSize, records.Length - offset);
+            var batch = new INPUT_RECORD[len];
+            Array.Copy(records, offset, batch, 0, len);
+
+            int written;
+            bool ok = WriteConsoleInputW(h, batch, batch.Length, out written);
+            if (!ok)
+            {
+                error = "Write failed, code=" + Marshal.GetLastWin32Error();
+                return false;
+            }
+            if (written <= 0)
+            {
+                error = "Write accepted 0 input records";
+                return false;
+            }
+
+            offset += written;
+            totalWritten += written;
+        }
+
+        return true;
+    }
+
     private static IntPtr OpenConIn()
     {
         return CreateFileW("CONIN$", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
@@ -108,12 +144,12 @@ public class ConsoleInjector
 
         for (int i = 0; i < lines.Length; i++)
         {
-            if (i > 0) // Shift+Enter 换行
+            if (i > 0) // Ctrl+Enter 换行 (Claude Code)
             {
-                ev.Add(K(true,  VK_SHIFT,  '\0', SHIFT_PRESSED));
-                ev.Add(K(true,  VK_RETURN, '\r', SHIFT_PRESSED));
-                ev.Add(K(false, VK_RETURN, '\r', SHIFT_PRESSED));
-                ev.Add(K(false, VK_SHIFT,  '\0', 0));
+                ev.Add(K(true,  VK_CONTROL, '\0', LEFT_CTRL_PRESSED));
+                ev.Add(K(true,  VK_RETURN,  '\r', LEFT_CTRL_PRESSED));
+                ev.Add(K(false, VK_RETURN,  '\r', LEFT_CTRL_PRESSED));
+                ev.Add(K(false, VK_CONTROL, '\0', 0));
             }
             foreach (char c in lines[i])
             {
@@ -122,16 +158,28 @@ public class ConsoleInjector
             }
         }
 
-        // Enter 提交
-        ev.Add(K(true,  VK_RETURN, '\r', 0));
-        ev.Add(K(false, VK_RETURN, '\r', 0));
-
         var arr = ev.ToArray();
-        int w;
-        bool ok = WriteConsoleInputW(h, arr, arr.Length, out w);
+        int wText;
+        string writeError;
+        bool ok = WriteAllConsoleInput(h, arr, out wText, out writeError);
+        if (!ok)
+        {
+            CloseHandle(h);
+            FreeConsole();
+            return "ERR:" + writeError;
+        }
+
+        Thread.Sleep(120);
+
+        var submit = new INPUT_RECORD[] {
+            K(true,  VK_RETURN, '\r', 0),
+            K(false, VK_RETURN, '\r', 0)
+        };
+        int wSubmit;
+        ok = WriteAllConsoleInput(h, submit, out wSubmit, out writeError);
         CloseHandle(h);
         FreeConsole();
-        return ok ? "ok:" + w : "ERR:Write failed, code=" + Marshal.GetLastWin32Error();
+        return ok ? "ok:" + (wText + wSubmit) : "ERR:" + writeError;
     }
 
     public static string InjectKey(int pid, string keyName)
@@ -172,10 +220,11 @@ public class ConsoleInjector
 
         var arr = ev.ToArray();
         int w;
-        bool ok = WriteConsoleInputW(h, arr, arr.Length, out w);
+        string writeError;
+        bool ok = WriteAllConsoleInput(h, arr, out w, out writeError);
         CloseHandle(h);
         FreeConsole();
-        return ok ? "ok:" + w : "ERR:Write failed, code=" + Marshal.GetLastWin32Error();
+        return ok ? "ok:" + w : "ERR:" + writeError;
     }
 }
 "@ -ReferencedAssemblies @()

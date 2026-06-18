@@ -22,9 +22,20 @@ const DEFAULTS = {
     enabled: false,
     idleGraceSeconds: 5,
   },
+  capabilityInjection: {
+    enabled: true,
+    mode: 'smart',
+    minIntervalMessages: 6,
+    minIntervalMinutes: 30,
+    capabilities: {
+      sendFile: false,
+    },
+  },
   wechat: {
     botToken: '',
     baseUrl: 'https://ilinkai.weixin.qq.com',
+    cdnBaseUrl: 'https://novac2c.cdn.weixin.qq.com/c2c',
+    fileItemType: 4,
     getUpdatesBuf: '',
     ownerUserId: '',
     lastContextToken: '',
@@ -41,8 +52,7 @@ export function load() {
   try {
     const raw = readFileSync(CONFIG_PATH, 'utf-8');
     _config = { ...structuredClone(DEFAULTS), ...JSON.parse(raw) };
-    _config.wechat = { ...DEFAULTS.wechat, ...(_config.wechat || {}) };
-    _config.lockScreenMode = { ...DEFAULTS.lockScreenMode, ...(_config.lockScreenMode || {}) };
+    _config = normalizeConfig(_config);
   } catch {
     _config = structuredClone(DEFAULTS);
   }
@@ -55,6 +65,7 @@ export function get() {
 
 export function save(partial) {
   if (partial) Object.assign(_config, partial);
+  _config = normalizeConfig(_config);
   writeFileSync(CONFIG_PATH, JSON.stringify(_config, null, 2), 'utf-8');
 }
 
@@ -66,4 +77,20 @@ export function saveWechat(partial) {
 export function isConfigured() {
   const c = get();
   return c.claudeDirs.length > 0 && !!c.wechat.botToken;
+}
+
+function normalizeConfig(config) {
+  const normalized = { ...structuredClone(DEFAULTS), ...(config || {}) };
+  normalized.wechat = { ...DEFAULTS.wechat, ...(normalized.wechat || {}) };
+  if (normalized.wechat.fileItemType === 3) normalized.wechat.fileItemType = DEFAULTS.wechat.fileItemType;
+  normalized.lockScreenMode = { ...DEFAULTS.lockScreenMode, ...(normalized.lockScreenMode || {}) };
+  normalized.capabilityInjection = {
+    ...DEFAULTS.capabilityInjection,
+    ...(normalized.capabilityInjection || {}),
+    capabilities: {
+      ...DEFAULTS.capabilityInjection.capabilities,
+      ...(normalized.capabilityInjection?.capabilities || {}),
+    },
+  };
+  return normalized;
 }

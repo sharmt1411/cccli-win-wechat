@@ -74,6 +74,66 @@ function DescribeToolUse($tu) {
     return $name
 }
 
+function StripCcWechatContext([string]$text) {
+    if ([string]::IsNullOrWhiteSpace($text)) { return '' }
+    return ([System.Text.RegularExpressions.Regex]::Replace(
+        $text,
+        '\s*<cc-wechat-context\b[^>]*>[\s\S]*?</cc-wechat-context>\s*',
+        '',
+        [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+    )).Trim()
+}
+
+function ExtractSendDirectives([string]$text) {
+    $items = @()
+    if ([string]::IsNullOrWhiteSpace($text)) { return $items }
+    $cleanText = StripCcWechatContext $text
+
+    $matches = [System.Text.RegularExpressions.Regex]::Matches(
+        $cleanText,
+        '```cc-wechat-send\s*([\s\S]*?)\s*```',
+        [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+    )
+    foreach ($m in $matches) {
+        $body = [string]$m.Groups[1].Value
+        if (-not [string]::IsNullOrWhiteSpace($body)) {
+            $items += $body.Trim()
+        }
+    }
+    if ($items.Count -gt 0) { return $items }
+
+    $jsonMatches = [System.Text.RegularExpressions.Regex]::Matches(
+        $cleanText,
+        '```(?:json)?\s*([\s\S]*?)\s*```',
+        [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+    )
+    foreach ($m in $jsonMatches) {
+        $body = [string]$m.Groups[1].Value
+        if ((-not [string]::IsNullOrWhiteSpace($body)) -and (($body -match '"files"\s*:') -or ($body -match '"path"\s*:'))) {
+            $items += $body.Trim()
+        }
+    }
+    if ($items.Count -gt 0) { return $items }
+
+    $trimmed = $cleanText.Trim()
+    if (($trimmed -match '^[\{\[]') -and (($trimmed -match '"files"\s*:') -or ($trimmed -match '"path"\s*:'))) {
+        $items += $trimmed
+    }
+    return $items
+}
+
+function StripSendDirectiveText([string]$text) {
+    if ([string]::IsNullOrWhiteSpace($text)) { return '' }
+    $cleanText = StripCcWechatContext $text
+    $cleanText = [System.Text.RegularExpressions.Regex]::Replace(
+        $cleanText,
+        '```cc-wechat-send\s*[\s\S]*?\s*```',
+        '',
+        [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+    )
+    return $cleanText.Trim()
+}
+
 $notifyDir = Join-Path $env:TEMP 'cc-wechat-notify'
 
 try {
@@ -112,6 +172,7 @@ try {
     $title = ''
     $sessionId = ''
     $interaction = $null
+    $sendDirectives = @()
 
     if ($transcript -and (Test-Path -LiteralPath $transcript)) {
         $sessionId = [System.IO.Path]::GetFileNameWithoutExtension($transcript)
@@ -136,13 +197,15 @@ try {
             if ($obj.type -eq 'assistant' -and $obj.message -and $obj.message.role -eq 'assistant') {
                 $c = $obj.message.content
                 if ($c -is [string]) { $lastReply = $c }
-                elseif ($c -is [array]) {
+                elseif ($null -ne $c) {
+                    $contentItems = @($c)
+                    $textArr = $contentItems | Where-Object { $_.type -eq 'text' } | ForEach-Object { $_.text }
                     # 1. 提取普通文本回复
-                    $textArr = $c | Where-Object { $_.type -eq 'text' } | ForEach-Object { $_.text }
+                    $textArr = $contentItems | Where-Object { $_.type -eq 'text' } | ForEach-Object { $_.text }
                     $lastReply = $textArr -join "`n"
 
                     # 2. 提取 Tool Use (AskUserQuestion 或 Permission)
-                    $tools = $c | Where-Object { $_.type -eq 'tool_use' }
+                    $tools = $contentItems | Where-Object { $_.type -eq 'tool_use' }
                     foreach ($tu in $tools) {
                         if ($tu.name -eq 'AskUserQuestion') {
                             $question = ''
@@ -211,6 +274,14 @@ try {
         }
     }
 
+    $sendDirectives = @(ExtractSendDirectives $lastReply | ForEach-Object { [string]$_ })
+    $lastPrompt = StripCcWechatContext $lastPrompt
+    if ($sendDirectives.Count -gt 0) {
+        $lastReply = StripSendDirectiveText $lastReply
+    } else {
+        $lastReply = StripCcWechatContext $lastReply
+    }
+
     if ($lastPrompt.Length -gt 200) { $lastPrompt = $lastPrompt.Substring(0, 200) + '...' }
     if ($lastReply.Length -gt 500) { $lastReply = $lastReply.Substring(0, 500) + '...' }
     if ($title.Length -gt 80) { $title = $title.Substring(0, 80) + '...' }
@@ -263,6 +334,7 @@ try {
         title     = $title
         prompt    = $lastPrompt
         lastReply = $lastReply
+        sendDirectives = $sendDirectives
         interaction = $interaction
         screenText= $screenText
         pid       = $procPid
