@@ -1,6 +1,6 @@
 // config.js — 配置管理
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import os from 'node:os';
@@ -81,6 +81,13 @@ export function saveWechat(partial) {
 export function isConfigured() {
   const c = get();
   return c.claudeDirs.length > 0 && !!c.wechat.botToken;
+}
+
+// 解析微信接收文件目录（inbound）。保存端与发送校验端共用此唯一定义，避免分歧。
+export function resolveInboundDir(dir) {
+  const configured = String(dir || './wechat-files').trim() || './wechat-files';
+  const baseDir = (process.versions && process.versions.electron) ? (process.env.PORTABLE_EXECUTABLE_DIR || process.cwd()) : process.cwd();
+  return resolve(baseDir, configured);
 }
 
 function normalizeConfig(config) {

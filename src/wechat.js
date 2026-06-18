@@ -1,10 +1,10 @@
 // wechat.js — iLink Bot API 协议封装
-import { saveWechat, get as getConfig } from './config.js';
+import { saveWechat, get as getConfig, resolveInboundDir } from './config.js';
 
 import { EventEmitter } from 'node:events';
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { basename, extname, join, resolve } from 'node:path';
+import { basename, extname, join } from 'node:path';
 
 const DEFAULT_MAX_FILE_BYTES = 20 * 1024 * 1024;
 const DEFAULT_MAX_INBOUND_MEDIA_BYTES = 100 * 1024 * 1024;
@@ -742,12 +742,6 @@ function bodyFromItemList(items) {
     }
   }
   return '';
-}
-
-function resolveInboundDir(dir) {
-  const configured = String(dir || './wechat-files').trim() || './wechat-files';
-  const baseDir = (process.versions && process.versions.electron) ? (process.env.PORTABLE_EXECUTABLE_DIR || process.cwd()) : process.cwd();
-  return resolve(baseDir, configured);
 }
 
 function dateStamp(date = new Date()) {

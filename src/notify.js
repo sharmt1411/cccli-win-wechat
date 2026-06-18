@@ -1,7 +1,7 @@
 // notify.js — 监听 hook 通知文件 → 推送微信
 import { watch, readdirSync, readFileSync, unlinkSync, existsSync, mkdirSync, statSync, realpathSync } from 'node:fs';
-import { basename, isAbsolute, join, relative, resolve } from 'node:path';
-import { get as getConfig } from './config.js';
+import { basename, isAbsolute, join, parse, relative, resolve } from 'node:path';
+import { get as getConfig, resolveInboundDir } from './config.js';
 import { normalizeInteraction, sanitizeScreenText, truncateText } from './interaction.js';
 import { readScreen } from './terminal.js';
 import { formatPresenceState, shouldOperateByPresence } from './presence.js';
@@ -335,9 +335,10 @@ function validateSendFileRequest(data, request) {
 
   let inboundReal = null;
   try {
-    const appBaseDir = (process.versions && process.versions.electron) ? (process.env.PORTABLE_EXECUTABLE_DIR || process.cwd()) : process.cwd();
-    const inboundConfig = getConfig().wechat?.inboundDir || './wechat-files';
-    inboundReal = realpathSync(resolve(appBaseDir, inboundConfig));
+    const dir = realpathSync(resolveInboundDir(getConfig().wechat?.inboundDir));
+    // 安全：拒绝 inboundDir 配置过宽（解析到卷/文件系统根，如 "/" 或 "C:\"）。
+    // 根目录会让放行范围失控，此时不启用 inbound 放行（仅允许会话目录）。
+    if (parse(dir).root !== dir) inboundReal = dir;
   } catch {}
 
   const isInsideSession = isInsidePath(baseReal, fileReal);
