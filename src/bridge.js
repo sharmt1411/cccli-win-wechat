@@ -67,6 +67,15 @@ export class Bridge {
 
     if (await this._pauseForPresenceMode(text, msg)) return;
 
+    const passthrough = parsePassthroughInput(text);
+    if (passthrough !== null) {
+      await this._handleReply(passthrough, msg, {
+        forcePlainInput: true,
+        skipDisambiguation: true,
+      });
+      return;
+    }
+
     if (this.pendingNewTabLaunch) {
       const handled = await this._handlePendingNewTabLaunch(text, msg);
       if (handled) return;
@@ -109,11 +118,11 @@ export class Bridge {
     }
 
     try {
-      if (this._isChoiceLike(text)) {
+      if (!opts.forcePlainInput && this._isChoiceLike(text)) {
         await this._refreshPendingInteraction(target.pid);
       }
 
-      const quickReply = this._resolveInteractionReply(text, target.pid);
+      const quickReply = opts.forcePlainInput ? null : this._resolveInteractionReply(text, target.pid);
       const payload = quickReply?.value || text;
 
       if (quickReply?.mode === 'keys') {
@@ -519,6 +528,7 @@ export class Bridge {
       '',
       '直接发文本',
       '发送到当前会话。',
+      '透传: <内容> 原样发送到终端。',
       '当前目标看 /ls。',
       '',
       '会话',
@@ -1364,4 +1374,10 @@ export class Bridge {
   _screenSuffix(screen) {
     return screen ? `\n\n📺 界面更新：\n${sanitizeScreenText(screen)}` : '';
   }
+}
+
+function parsePassthroughInput(text) {
+  const s = String(text || '').trim();
+  if (s.length < 2 || !s.startsWith('<') || !s.endsWith('>')) return null;
+  return s.slice(1, -1);
 }

@@ -24,6 +24,7 @@ export class SessionManager {
         try {
           const raw = readFileSync(join(sessDir, f), 'utf-8');
           const data = JSON.parse(raw);
+          if (!isCliSession(data)) continue;
           // 检查进程是否还活着
           if (!isProcessAlive(data.pid)) continue;
           sessions.push({
@@ -34,6 +35,8 @@ export class SessionManager {
             status: data.status || 'unknown',
             updatedAt: data.updatedAt || 0,
             version: data.version || '',
+            kind: data.kind || '',
+            entrypoint: data.entrypoint || '',
             claudeDir: dir,
             source,
           });
@@ -77,7 +80,11 @@ export class SessionManager {
   }
 }
 
-/** cwd 转 projectKey: D:\projects\cc-wechat → D--projects-cc-wechat */
+export function isCliSession(data) {
+  return String(data?.entrypoint || '').toLowerCase() === 'cli';
+}
+
+// cwd to projectKey: D:\projects\cc-wechat -> D--projects-cc-wechat
 function cwdToProjectKey(cwd) {
   if (!cwd) return '';
   return cwd.replace(/[:/\\]/g, '-').replace(/^-/, '');

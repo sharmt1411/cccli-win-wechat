@@ -5,6 +5,7 @@ import { get as getConfig } from './config.js';
 import { normalizeInteraction, sanitizeScreenText, truncateText } from './interaction.js';
 import { readScreen } from './terminal.js';
 import { formatPresenceState, shouldOperateByPresence } from './presence.js';
+import { isCliSession } from './session.js';
 
 export class NotifyWatcher {
   /**
@@ -59,6 +60,10 @@ export class NotifyWatcher {
       if (!existsSync(filePath)) return;
       const raw = readFileSync(filePath, 'utf-8');
       const data = JSON.parse(raw);
+      if (data.entrypoint && !isCliSession(data)) {
+        console.log(`🚫 非 CLI 会话通知已忽略: ${data.event} [${data.project}] entrypoint=${data.entrypoint}`);
+        return;
+      }
 
       const gate = await shouldOperateByPresence();
       if (!gate.allowed) {

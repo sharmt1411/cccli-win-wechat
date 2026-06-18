@@ -217,16 +217,29 @@ try {
 
     # Find PID
     $procPid = 0
+    $matchedSession = $false
+    $sessionEntryPoint = ''
+    $sessionKind = ''
     if ($sessionId -and $ClaudeDir) {
         $sessDir = Join-Path $ClaudeDir 'sessions'
         if (Test-Path $sessDir) {
             Get-ChildItem $sessDir -Filter '*.json' | ForEach-Object {
                 try {
                     $s = Get-Content $_.FullName -Raw | ConvertFrom-Json
-                    if ($s.sessionId -eq $sessionId) { $procPid = [int]$s.pid }
+                    if ($s.sessionId -eq $sessionId) {
+                        $matchedSession = $true
+                        $procPid = [int]$s.pid
+                        $sessionEntryPoint = [string](GetProp $s 'entrypoint' '')
+                        $sessionKind = [string](GetProp $s 'kind' '')
+                    }
                 } catch {}
             }
         }
+    }
+
+    if ($matchedSession -and $sessionEntryPoint -ne 'cli') {
+        Log "skip non-cli session sessionId=$sessionId entrypoint=$sessionEntryPoint kind=$sessionKind"
+        exit 0
     }
 
     # 读取终端屏幕内容 (如果是需要用户操作的 Notification)
@@ -254,6 +267,8 @@ try {
         screenText= $screenText
         pid       = $procPid
         sessionId = $sessionId
+        entrypoint= $sessionEntryPoint
+        kind      = $sessionKind
         claudeDir = $ClaudeDir
         timestamp = [long](Get-Date -UFormat %s) * 1000
     } | ConvertTo-Json -Compress -Depth 6
