@@ -14,11 +14,12 @@
   "build": {
     "appId": "com.cc-wechat.app",
     "productName": "cc-wechat",
+    "icon": "assets/icon.ico",
     "directories": {
       "output": "dist"
     },
     "win": {
-      "target": "nsis"
+      "target": "portable"
     },
     "nsis": {
       "oneClick": false,
@@ -29,7 +30,7 @@
       "preload.js",
       "ui/**/*",
       "src/**/*",
-      "config.json",
+      "assets/**/*",
       "node_modules/**/*"
     ]
   },

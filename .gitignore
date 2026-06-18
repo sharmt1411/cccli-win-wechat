@@ -3,3 +3,4 @@ node_modules/
 .rule 
 .agent
 config.json
+/dist

@@ -262,7 +262,7 @@
     let mainPanelObj = panelQr; // 记录是从二维码还是运行状态切过去的
 
     closeBtn.addEventListener('click', () => {
-      window.electronAPI.quitApp();
+      window.electronAPI.closeWindow();
     });
 
     // 退出登录
@@ -325,9 +325,6 @@
 
     // 监听主进程发来的二维码
     window.electronAPI.onQrcode((qr) => {
-      // 记录一下获取到的 QR 数据，方便排查裂图原因
-      appendLog('获取到二维码数据: ' + JSON.stringify(qr).substring(0, 300));
-      
       if (qr.local_base64) {
         // 使用主进程生成的本地 base64 图像
         qrBox.innerHTML = `<img src="${qr.local_base64}" alt="QR Code" />`;

@@ -3,6 +3,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('electronAPI', {
   closeWindow: () => ipcRenderer.invoke('app:close'),
   quitApp: () => ipcRenderer.invoke('app:quit'),
+  hideApp: () => ipcRenderer.invoke('app:hide'),
   
   onQrcode: (callback) => ipcRenderer.on('wechat:qrcode', (_event, value) => callback(value)),
   onStatus: (callback) => ipcRenderer.on('wechat:status', (_event, value) => callback(value)),

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Tray, Menu, ipcMain, nativeTheme } from 'electron';
+import { app, BrowserWindow, Tray, Menu, ipcMain, nativeTheme, nativeImage } from 'electron';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -18,19 +18,7 @@ let bot = null;
 let bridge = null;
 let notifier = null;
 
-// 防止程序多开
-const gotTheLock = app.requestSingleInstanceLock();
-if (!gotTheLock) {
-  app.quit();
-}
-
-app.on('second-instance', () => {
-  if (mainWindow) {
-    if (mainWindow.isMinimized()) mainWindow.restore();
-    mainWindow.show();
-    mainWindow.focus();
-  }
-});
+// 允许多开：不再使用 requestSingleInstanceLock
 
 async function createWindow() {
   mainWindow = new BrowserWindow({
@@ -58,8 +46,9 @@ async function createWindow() {
 }
 
 function createTray() {
-  // TODO: 需要准备一个 16x16 的 icon.png
-  tray = new Tray(path.join(__dirname, 'assets', 'icon.png'));
+  const iconPath = path.join(__dirname, 'assets', 'icon.png');
+  const icon = nativeImage.createFromPath(iconPath).resize({ width: 16, height: 16 });
+  tray = new Tray(icon);
   
   const contextMenu = Menu.buildFromTemplate([
     { label: '显示面板', click: () => toggleWindow() },
@@ -151,8 +140,7 @@ async function startWeChatService() {
 
 app.whenReady().then(async () => {
   await createWindow();
-  // 暂时注释 Tray 创建，等有图标了再打开
-  // createTray(); 
+  createTray(); 
   mainWindow.show(); // 开发阶段默认显示
   
   // 拦截 console.log 到前端

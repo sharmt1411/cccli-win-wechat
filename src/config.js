@@ -3,8 +3,17 @@ import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import os from 'node:os';
+
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
-const CONFIG_PATH = join(__dirname, '..', 'config.json');
+let CONFIG_PATH = join(__dirname, '..', 'config.json');
+
+// 如果是 Electron 打包后的环境
+if (process.versions && process.versions.electron) {
+  // electron-builder portable 会把用户启动时的所在目录注入到环境变量中
+  // 如果没有，则兜底取当前工作目录或者可执行文件所在目录
+  CONFIG_PATH = join(process.env.PORTABLE_EXECUTABLE_DIR || process.cwd(), 'config.json');
+}
 
 const DEFAULTS = {
   claudeDirs: [],
