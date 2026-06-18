@@ -436,15 +436,46 @@ export class Bridge {
     let holdReason = '';
 
     try {
-      await newTab({
+      const tab = await newTab({
         cwd,
         taskDescription,
         claudeDir: cfg.claudeDirs[0],
       });
+      launch.consolePid = tab?.pid || null;
       const desc = taskDescription ? ` 任务: ${taskDescription}` : '';
-      const session = await this._waitForNewSession(cwd, beforePids);
+      const located = await this._waitForNewSessionOrTrust(cwd, beforePids, launch.consolePid);
+      const session = located.session;
 
       if (!session) {
+        if (located.trustPrompt && launch.consolePid) {
+          if (autoTrust) {
+            const trusted = await this._acceptNewTabTrust({
+              pid: launch.consolePid,
+              cwd,
+              beforePids,
+              taskDescription,
+              queued: launch.queued,
+              notifications: launch.notifications,
+              expiresAt: Date.now() + 10 * 60 * 1000,
+            }, msg, { silentEnter: true });
+            drainQueued = trusted;
+            launch.heldByTrust = true;
+            return;
+          }
+
+          holdReason = '等待目录信任确认';
+          await this._startPendingNewTabTrust({
+            pid: launch.consolePid,
+            cwd,
+            beforePids,
+            taskDescription,
+            msg,
+            screen: located.screen,
+            launch,
+          });
+          return;
+        }
+
         holdReason = '未能定位新会话';
         await this.wechat.reply(msg, [
           '🆕 已打开新 tab',
@@ -461,38 +492,36 @@ export class Bridge {
       launch.readyPid = session.pid;
 
       await new Promise(r => setTimeout(r, 500));
-      const screen = await readScreen(session.pid).catch(() => '');
+      const screen = located.screen || await readScreen(session.pid).catch(() => '');
       const trustPrompt = this._isTrustPrompt(screen);
 
       if (trustPrompt && autoTrust) {
-        await injectKey(session.pid, 'enter');
-        await new Promise(r => setTimeout(r, 700));
-        const nextScreen = await readScreen(session.pid).catch(() => '');
-        drainQueued = true;
-        await this.wechat.reply(msg, [
-          '🆕 已打开新 tab，并已确认目录信任',
-          this._formatTargetLines(session),
-          taskDescription ? `任务: ${taskDescription}` : '',
-          this._screenSuffix(nextScreen),
-        ].filter(Boolean).join('\n'));
+        const trusted = await this._acceptNewTabTrust({
+          pid: session.pid,
+          cwd,
+          beforePids,
+          taskDescription,
+          queued: launch.queued,
+          notifications: launch.notifications,
+          expiresAt: Date.now() + 10 * 60 * 1000,
+        }, msg, { session, silentEnter: true });
+        drainQueued = trusted;
+        launch.heldByTrust = true;
         return;
       }
 
       if (trustPrompt) {
         holdReason = '等待信任确认';
-        this.pendingNewTabTrust = {
+        await this._startPendingNewTabTrust({
           pid: session.pid,
           cwd,
-          expiresAt: Date.now() + 10 * 60 * 1000,
-        };
-        await this.wechat.reply(msg, [
-          '🆕 已打开新 tab',
-          this._formatTargetLines(session),
-          taskDescription ? `任务: ${taskDescription}` : '',
-          '状态: Claude 正在等待目录信任确认',
-          '下一步: 信任请发 1、信任 或 /enter；不信任可发 /down 后 /enter，或 /esc。',
-          this._screenSuffix(screen).trimStart(),
-        ].filter(Boolean).join('\n'));
+          beforePids,
+          taskDescription,
+          msg,
+          screen,
+          launch,
+          session,
+        });
         return;
       }
 
@@ -509,8 +538,10 @@ export class Bridge {
       if (this.pendingNewTabLaunch === launch) {
         this.pendingNewTabLaunch = null;
       }
-      await this._flushNewTabLaunchNotifications(launch);
-      await this._flushNewTabLaunchQueue(launch, { drain: drainQueued, reason: holdReason });
+      if (!launch.heldByTrust) {
+        await this._flushNewTabLaunchNotifications(launch);
+        await this._flushNewTabLaunchQueue(launch, { drain: drainQueued, reason: holdReason });
+      }
     }
   }
 
@@ -832,40 +863,135 @@ export class Bridge {
     const pending = this.pendingNewTabTrust;
     if (!pending) return false;
 
-    if (Date.now() > pending.expiresAt || !this.sessions.findByPid(pending.pid)) {
-      this.pendingNewTabTrust = null;
-      return false;
+    if (Date.now() > pending.expiresAt) {
+      await this._exitPendingNewTabTrust(pending, msg, '等待目录信任确认超时，已退出新 tab 创建流程。');
+      return true;
     }
 
-    if (text.startsWith('/')) {
+    const ready = this._findNewTabSession(pending);
+    if (ready && !this._isTrustPrompt(await readScreen(pending.pid).catch(() => ''))) {
+      this.pendingNewTabTrust = null;
+      this.currentTarget = ready.pid;
+      this.lastNotifiedPid = ready.pid;
+      await this.wechat.reply(msg, [
+        '✅ 新 tab 已就绪',
+        this._formatTargetLines(ready),
+        pending.taskDescription ? `任务: ${pending.taskDescription}` : '',
+      ].filter(Boolean).join('\n'));
       return false;
     }
 
     const s = String(text || '').trim();
-    if (/^(?:1|y|yes|信任|确认|同意)$/i.test(s)) {
-      try {
-        await injectKey(pending.pid, 'enter');
-        await new Promise(r => setTimeout(r, 700));
-        const screen = await readScreen(pending.pid).catch(() => '');
-        this._clearTrustHoldIfResolved(pending.pid, screen, 'enter');
-        await this.wechat.reply(msg, [
-          '✅ 已确认目录信任',
-          `目录: ${pending.cwd}`,
-          this._screenSuffix(screen),
-        ].filter(Boolean).join('\n'));
-      } catch (e) {
-        await this.wechat.reply(msg, `❌ 确认目录信任失败\n原因: ${e.message}`);
-      }
+    if (/^(?:1|y|yes|信任|确认|同意|\/enter)$/i.test(s)) {
+      await this._acceptNewTabTrust(pending, msg);
+      return true;
+    }
+
+    if (/^(?:2|n|no|不信任|退出|取消|\/cancel|\/esc)$/i.test(s)) {
+      await this._exitPendingNewTabTrust(pending, msg, '已退出新 tab 创建流程。');
       return true;
     }
 
     await this.wechat.reply(msg, [
       '⏸️ 新 tab 正在等待目录信任确认',
-      `目录: ${pending.cwd}`,
       '这条消息没有发送到 Claude。',
-      '下一步: 信任请发 1、信任 或 /enter；不信任可发 /down 后 /enter，或 /esc。',
+      '',
+      this._formatNewTabTrustPrompt(pending),
     ].join('\n'));
     return true;
+  }
+
+  async _startPendingNewTabTrust({ pid, cwd, beforePids, taskDescription, msg, screen, launch, session = null }) {
+    if (launch) launch.heldByTrust = true;
+    const pending = {
+      pid,
+      cwd,
+      beforePids,
+      taskDescription,
+      queued: launch?.queued || [],
+      notifications: launch?.notifications || [],
+      sessionPid: session?.pid || null,
+      expiresAt: Date.now() + 10 * 60 * 1000,
+    };
+    this.pendingNewTabTrust = pending;
+    await this.wechat.reply(msg, [
+      '🆕 已打开新 tab',
+      session ? this._formatTargetLines(session) : `目录: ${cwd}`,
+      taskDescription ? `任务: ${taskDescription}` : '',
+      '',
+      this._formatNewTabTrustPrompt(pending),
+      this._screenSuffix(screen).trimStart(),
+    ].filter(Boolean).join('\n'));
+  }
+
+  _formatNewTabTrustPrompt(pending) {
+    return [
+      '状态: Claude 正在等待目录信任确认',
+      `目录: ${pending.cwd}`,
+      '',
+      '回复数字选择:',
+      '1. 信任此目录并继续',
+      '2. 不信任并退出',
+      '',
+      '快捷: y/yes/信任 表示 1；n/no/退出 表示 2。',
+      '完成或退出前，其他微信消息不会发送到 Claude。',
+    ].join('\n');
+  }
+
+  async _acceptNewTabTrust(pending, msg, { session = null, silentEnter = false } = {}) {
+    try {
+      await injectKey(pending.pid, 'enter');
+      await new Promise(r => setTimeout(r, 900));
+      session ||= await this._waitForNewSession(pending.cwd, pending.beforePids, 20000);
+      if (!session) {
+        const screen = await readScreen(pending.pid).catch(() => '');
+        pending.expiresAt = Date.now() + 10 * 60 * 1000;
+        this.pendingNewTabTrust = pending;
+        await this.wechat.reply(msg, [
+          silentEnter ? '⏸️ 已尝试自动确认目录信任' : '⏸️ 已确认目录信任',
+          '但暂时还没有定位到新的 Claude 会话。',
+          '',
+          this._formatNewTabTrustPrompt(pending),
+          this._screenSuffix(screen).trimStart(),
+        ].filter(Boolean).join('\n'));
+        return false;
+      }
+
+      this.pendingNewTabTrust = null;
+      this.currentTarget = session.pid;
+      this.lastNotifiedPid = session.pid;
+      
+      // 等待 Claude Code 完全初始化终端 UI，避免吞掉第一条（带有 context 的长文本）输入
+      await new Promise(r => setTimeout(r, 2000));
+      const screen = await readScreen(session.pid).catch(() => '');
+      await this.wechat.reply(msg, [
+        silentEnter ? '🆕 已打开新 tab，并已确认目录信任' : '✅ 已确认目录信任，新 tab 已就绪',
+        this._formatTargetLines(session),
+        pending.taskDescription ? `任务: ${pending.taskDescription}` : '',
+        this._screenSuffix(screen),
+      ].filter(Boolean).join('\n'));
+
+      await this._flushNewTabLaunchNotifications(pending);
+      await this._flushNewTabLaunchQueue({ queued: pending.queued, readyPid: session.pid }, { drain: true, reason: '' });
+      return true;
+    } catch (e) {
+      this.pendingNewTabTrust = pending;
+      await this.wechat.reply(msg, `❌ 确认目录信任失败\n原因: ${e.message}`);
+      return false;
+    }
+  }
+
+  async _exitPendingNewTabTrust(pending, msg, reason) {
+    try {
+      await injectKey(pending.pid, 'esc');
+    } catch {}
+    this.pendingNewTabTrust = null;
+    await this._flushNewTabLaunchQueue({ queued: pending.queued }, { drain: false, reason });
+    await this.wechat.reply(msg, [
+      `✅ ${reason}`,
+      `目录: ${pending.cwd}`,
+      '现在可以继续其他操作。',
+    ].join('\n'));
   }
 
   async _flushNewTabLaunchQueue(launch, { drain, reason }) {
@@ -1392,16 +1518,50 @@ export class Bridge {
     return this._listChildDirectories(dir).slice(start, start + NEW_DIR_PAGE_SIZE);
   }
 
-  async _waitForNewSession(cwd, beforePids) {
-    const deadline = Date.now() + 8000;
+  async _waitForNewSessionOrTrust(cwd, beforePids, consolePid, timeoutMs = 8000) {
+    const deadline = Date.now() + timeoutMs;
+    let lastScreen = '';
+    let nextScreenReadAt = 0;
     while (Date.now() < deadline) {
-      const list = this.sessions.listActive();
-      const fresh = list.find(s => !beforePids.has(s.pid) && this._samePath(s.cwd, cwd));
-      if (fresh) return fresh;
-      const byCwd = list.find(s => this._samePath(s.cwd, cwd));
-      if (byCwd && !beforePids.has(byCwd.pid)) return byCwd;
+      const session = this._findNewSession(cwd, beforePids);
+      if (session) return { session, screen: '' };
+
+      if (consolePid && Date.now() >= nextScreenReadAt) {
+        nextScreenReadAt = Date.now() + 700;
+        lastScreen = await readScreen(consolePid).catch(() => '');
+        if (this._isTrustPrompt(lastScreen)) {
+          return { session: null, trustPrompt: true, screen: lastScreen };
+        }
+      }
+      await new Promise(r => setTimeout(r, 250));
+    }
+    return { session: null, trustPrompt: this._isTrustPrompt(lastScreen), screen: lastScreen };
+  }
+
+  async _waitForNewSession(cwd, beforePids, timeoutMs = 8000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const session = this._findNewSession(cwd, beforePids);
+      if (session) return session;
       await new Promise(r => setTimeout(r, 300));
     }
+    return null;
+  }
+
+  _findNewTabSession(pending) {
+    if (pending?.sessionPid) {
+      const session = this.sessions.findByPid(pending.sessionPid);
+      if (session) return session;
+    }
+    return this._findNewSession(pending.cwd, pending.beforePids || new Set());
+  }
+
+  _findNewSession(cwd, beforePids) {
+    const list = this.sessions.listActive();
+    const fresh = list.find(s => !beforePids.has(s.pid) && this._samePath(s.cwd, cwd));
+    if (fresh) return fresh;
+    const byCwd = list.find(s => this._samePath(s.cwd, cwd));
+    if (byCwd && !beforePids.has(byCwd.pid)) return byCwd;
     return null;
   }
 

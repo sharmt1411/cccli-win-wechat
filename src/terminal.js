@@ -1,6 +1,9 @@
 // terminal.js — Windows 终端操作
 import { execFile, exec } from 'node:child_process';
+import { existsSync, readFileSync, unlinkSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
@@ -41,7 +44,9 @@ export async function injectInput(pid, text) {
  */
 export async function newTab({ cwd, taskDescription, claudeDir }) {
   const args = ['new-tab', '-d', cwd];
+  const pidFile = join(tmpdir(), `cc-wechat-newtab-${Date.now()}-${randomUUID()}.pid`);
   const command = [
+    `$PID | Set-Content -LiteralPath ${psQuote(pidFile)} -Encoding ascii`,
     claudeDir && !claudeDir.endsWith('.claude')
       ? `$env:CLAUDE_CONFIG_DIR = ${psQuote(claudeDir)}`
       : '',
@@ -50,21 +55,43 @@ export async function newTab({ cwd, taskDescription, claudeDir }) {
       : 'claude',
   ].filter(Boolean).join('; ');
 
+  const encodedCommand = Buffer.from(command, 'utf16le').toString('base64');
+
   args.push(
     'powershell.exe',
     '-NoExit',
     '-NoProfile',
     '-ExecutionPolicy',
     'Bypass',
-    '-Command',
-    command,
+    '-EncodedCommand',
+    encodedCommand,
   );
 
   await execFileAsync('wt.exe', args, { timeout: 10000 });
+  return { pid: await waitForPidFile(pidFile) };
 }
 
 function psQuote(value) {
   return `'${String(value).replace(/'/g, "''")}'`;
+}
+
+async function waitForPidFile(pidFile) {
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    try {
+      if (existsSync(pidFile)) {
+        const raw = readFileSync(pidFile, 'utf8').trim();
+        try { unlinkSync(pidFile); } catch {}
+        const pid = parseInt(raw, 10);
+        return Number.isFinite(pid) && pid > 0 ? pid : null;
+      }
+    } catch {
+      // Try again until the short deadline. The tab may still be starting.
+    }
+    await new Promise(r => setTimeout(r, 100));
+  }
+  try { unlinkSync(pidFile); } catch {}
+  return null;
 }
 
 /**

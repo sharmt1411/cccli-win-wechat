@@ -20,6 +20,52 @@ let notifier = null;
 
 // 允许多开：不再使用 requestSingleInstanceLock
 
+function getLoginItemPath() {
+  return process.env.PORTABLE_EXECUTABLE_FILE || process.execPath;
+}
+
+function getLoginItemArgs() {
+  const args = [];
+  if (process.defaultApp && process.argv[1]) {
+    args.push(path.resolve(process.argv[1]));
+  }
+  args.push('--hidden');
+  return args;
+}
+
+function getLoginItemQueryOptions() {
+  return {
+    path: getLoginItemPath(),
+    args: getLoginItemArgs(),
+  };
+}
+
+function getLoginItemOptions(openAtLogin) {
+  return {
+    ...getLoginItemQueryOptions(),
+    openAtLogin,
+    openAsHidden: true,
+  };
+}
+
+function setAutoStart(enable) {
+  // Portable builds can otherwise register Electron's temp unpacked exe.
+  app.setLoginItemSettings({ openAtLogin: false });
+  app.setLoginItemSettings(getLoginItemOptions(Boolean(enable)));
+}
+
+function repairAutoStartPath() {
+  const current = app.getLoginItemSettings();
+  const desired = app.getLoginItemSettings(getLoginItemQueryOptions());
+  if (!current.openAtLogin && !desired.openAtLogin) return;
+  setAutoStart(true);
+  console.log(`🔧 已校正开机自启路径: ${getLoginItemPath()}`);
+}
+
+function shouldStartHidden() {
+  return process.argv.includes('--hidden') || app.commandLine.hasSwitch('hidden');
+}
+
 async function createWindow() {
   mainWindow = new BrowserWindow({
     width: 380,
@@ -141,7 +187,9 @@ async function startWeChatService() {
 app.whenReady().then(async () => {
   await createWindow();
   createTray(); 
-  mainWindow.show(); // 开发阶段默认显示
+  if (!shouldStartHidden()) {
+    mainWindow.show(); // 开发阶段默认显示
+  }
   
   // 拦截 console.log 到前端
   const originalLog = console.log;
@@ -151,6 +199,7 @@ app.whenReady().then(async () => {
   }
 
   startWeChatService();
+  repairAutoStartPath();
 });
 
 app.on('window-all-closed', () => {
@@ -173,14 +222,11 @@ ipcMain.handle('config:save', (event, newConfig) => {
 });
 
 ipcMain.handle('config:getAutoStart', () => {
-  return app.getLoginItemSettings().openAtLogin;
+  return app.getLoginItemSettings(getLoginItemQueryOptions()).openAtLogin;
 });
 
 ipcMain.handle('config:setAutoStart', (event, enable) => {
-  app.setLoginItemSettings({
-    openAtLogin: enable,
-    openAsHidden: true, // 启动时隐藏到托盘
-  });
+  setAutoStart(enable);
 });
 
 ipcMain.handle('config:clearToken', () => {

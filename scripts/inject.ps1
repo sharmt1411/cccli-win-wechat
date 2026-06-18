@@ -169,7 +169,9 @@ public class ConsoleInjector
             return "ERR:" + writeError;
         }
 
-        Thread.Sleep(120);
+        // 根据输入长度动态增加延迟，给 Claude Code 足够的渲染和读取时间，防止吞字或错乱
+        int sleepMs = Math.Max(300, arr.Length / 10);
+        Thread.Sleep(sleepMs);
 
         var submit = new INPUT_RECORD[] {
             K(true,  VK_RETURN, '\r', 0),
@@ -211,7 +213,7 @@ public class ConsoleInjector
                 case "space": vk = VK_SPACE; ch = ' '; break;
                 case "tab": vk = VK_TAB; ch = '\t'; break;
                 case "enter": vk = VK_RETURN; ch = '\r'; break;
-                case "esc": vk = VK_ESCAPE; break;
+                case "esc": vk = VK_ESCAPE; ch = '\x1B'; break;
                 default: return "ERR:Unknown key " + keyName;
             }
             ev.Add(K(true, vk, ch, 0));
