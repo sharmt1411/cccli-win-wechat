@@ -439,7 +439,7 @@ function formatInteraction(interaction) {
   lines.push('');
   lines.push('回复数字选择:');
   for (const option of options) {
-    lines.push(formatOptionLine(option, interaction.selectionMode));
+    lines.push(formatOptionLine(option, interaction.selectionMode, { bracketNumber: false }));
     if (option.description) lines.push(`说明: ${option.description}`);
   }
 
@@ -567,12 +567,13 @@ function formatToolLabel(interaction) {
   return `${name} ${detail}`;
 }
 
-function formatOptionLine(option, selectionMode) {
+function formatOptionLine(option, selectionMode, { bracketNumber = true } = {}) {
   const label = shortenOptionLabel(option.label);
-  if (selectionMode !== 'multi' || option.checkbox === false) return `[${option.number}] ${label}`;
+  const number = bracketNumber ? `[${option.number}]` : `${option.number}.`;
+  if (selectionMode !== 'multi' || option.checkbox === false) return `${number} ${label}`;
   const mark = option.checked ? '[x]' : '[ ]';
   const cursor = option.cursor ? '> ' : '';
-  return `${cursor}[${option.number}] ${mark} ${label}`;
+  return `${cursor}${number} ${mark} ${label}`;
 }
 
 function shortenOptionLabel(label) {

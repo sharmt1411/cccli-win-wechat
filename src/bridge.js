@@ -9,6 +9,7 @@ import { homedir } from 'node:os';
 import { dirname, isAbsolute, resolve } from 'node:path';
 
 const NEW_DIR_PAGE_SIZE = 10;
+const PENDING_WECHAT_FILES_TTL_MS = 60 * 60 * 1000;
 
 export class Bridge {
   /**
@@ -28,6 +29,7 @@ export class Bridge {
     this.pendingNewTabTrust = null;
     this.notificationSeq = 0;
     this.capabilityInjectionState = new Map();
+    this.pendingWechatFiles = [];
   }
 
   /** 由 NotifyWatcher 调用，更新最后通知的会话；返回 false 可暂缓推送 */
@@ -63,13 +65,29 @@ export class Bridge {
 
   /** 处理微信消息 */
   async handleMessage(msg) {
-    const text = msg.item_list?.[0]?.text_item?.text?.trim();
-    if (!text) return;
+    const inbound = await this._captureWechatFiles(msg);
+    const text = (this.wechat.extractMessageText?.(msg) || msg.item_list?.[0]?.text_item?.text || '').trim();
 
-    if (await this._pauseForPresenceMode(text, msg)) return;
+    if (!text) {
+      if (inbound.files.length) {
+        this._queueWechatFiles(inbound.files);
+        await this.wechat.reply(msg, this._formatWechatFilesReceived(inbound.files, inbound.errors, inbound.unhandled));
+      } else if (inbound.errors.length) {
+        await this.wechat.reply(msg, this._formatWechatFilesError(inbound.errors, inbound.unhandled));
+      } else if (inbound.unhandled.length) {
+        await this.wechat.reply(msg, this._formatWechatFilesUnhandled(inbound.unhandled));
+      }
+      return;
+    }
+
+    if (await this._pauseForPresenceMode(text, msg)) {
+      this._queueWechatFiles(inbound.files);
+      return;
+    }
 
     const passthrough = parsePassthroughInput(text);
     if (passthrough !== null) {
+      this._queueWechatFiles(inbound.files);
       await this._handleReply(passthrough, msg, {
         forcePlainInput: true,
         skipDisambiguation: true,
@@ -78,30 +96,126 @@ export class Bridge {
     }
 
     if (this.pendingNewTabLaunch) {
-      const handled = await this._handlePendingNewTabLaunch(text, msg);
+      const handled = await this._handlePendingNewTabLaunch(text, msg, inbound.files);
       if (handled) return;
     }
 
     if (this.pendingNewTabTrust) {
       const handled = await this._handlePendingNewTabTrust(text, msg);
-      if (handled) return;
+      if (handled) {
+        this._queueWechatFiles(inbound.files);
+        return;
+      }
     }
 
     if (this.pendingTargetChoice) {
       const handled = await this._handlePendingTargetChoice(text, msg);
-      if (handled) return;
+      if (handled) {
+        this._queueWechatFiles(inbound.files);
+        return;
+      }
     }
 
     if (this.pendingNewDirGuide) {
       const handled = await this._handlePendingNewDirGuide(text, msg);
-      if (handled) return;
+      if (handled) {
+        this._queueWechatFiles(inbound.files);
+        return;
+      }
     }
 
     if (text.startsWith('/')) {
+      this._queueWechatFiles(inbound.files);
       await this._handleCommand(text, msg);
     } else {
-      await this._handleReply(text, msg);
+      const choiceLike = this._isChoiceLike(text);
+      const filesForInput = choiceLike ? [] : this._consumeWechatFiles(inbound.files);
+      if (choiceLike) this._queueWechatFiles(inbound.files);
+      await this._handleReply(text, msg, {
+        wechatFiles: filesForInput,
+      });
     }
+  }
+
+  async _captureWechatFiles(msg) {
+    if (typeof this.wechat.saveInboundMedia !== 'function') {
+      return { files: [], errors: [], unhandled: [] };
+    }
+
+    try {
+      const result = await this.wechat.saveInboundMedia(msg);
+      return {
+        files: Array.isArray(result?.files) ? result.files : [],
+        errors: Array.isArray(result?.errors) ? result.errors : [],
+        unhandled: Array.isArray(result?.unhandled) ? result.unhandled : [],
+      };
+    } catch (e) {
+      return { files: [], errors: [e.message], unhandled: [] };
+    }
+  }
+
+  _queueWechatFiles(files) {
+    if (!Array.isArray(files) || !files.length) return;
+    const now = Date.now();
+    this._prunePendingWechatFiles(now);
+    this.pendingWechatFiles.push(...files.map(file => ({
+      ...file,
+      addedAt: now,
+      expiresAt: now + PENDING_WECHAT_FILES_TTL_MS,
+    })));
+    this.pendingWechatFiles = dedupeWechatFiles(this.pendingWechatFiles);
+  }
+
+  _consumeWechatFiles(currentFiles = []) {
+    const now = Date.now();
+    this._prunePendingWechatFiles(now);
+    const all = [
+      ...this.pendingWechatFiles,
+      ...currentFiles.map(file => ({
+        ...file,
+        addedAt: now,
+        expiresAt: now + PENDING_WECHAT_FILES_TTL_MS,
+      })),
+    ];
+    this.pendingWechatFiles = [];
+    return dedupeWechatFiles(all);
+  }
+
+  _prunePendingWechatFiles(now = Date.now()) {
+    this.pendingWechatFiles = this.pendingWechatFiles.filter(file => file.expiresAt > now);
+  }
+
+  _formatWechatFilesReceived(files, errors = [], unhandled = []) {
+    const lines = [
+      `已收到 ${files.length} 个微信文件，已保存。`,
+      '下一条普通文本会自动附带这些文件路径。',
+      '',
+      ...files.map(file => `- ${file.path}`),
+    ];
+    if (errors.length) {
+      lines.push('', '部分文件处理失败:', ...errors.map(err => `- ${err}`));
+    }
+    if (unhandled.length) {
+      lines.push('', '部分媒体未能识别下载参数:', ...formatUnhandledWechatItems(unhandled));
+    }
+    return lines.join('\n');
+  }
+
+  _formatWechatFilesError(errors, unhandled = []) {
+    return [
+      '微信文件处理失败。',
+      ...errors.map(err => `- ${err}`),
+      ...(unhandled.length ? ['', '未识别的媒体:', ...formatUnhandledWechatItems(unhandled)] : []),
+    ].join('\n');
+  }
+
+  _formatWechatFilesUnhandled(unhandled) {
+    return [
+      '收到微信文件，但当前没有拿到可下载参数，未能保存。',
+      '请查看控制台日志: WeChat inbound media skipped',
+      '',
+      ...formatUnhandledWechatItems(unhandled),
+    ].join('\n');
   }
 
   // ── 普通文本 → 注入到目标 CC ──
@@ -109,23 +223,34 @@ export class Bridge {
   async _handleReply(text, msg, opts = {}) {
     const target = opts.targetPid ? this.sessions.findByPid(opts.targetPid) : this._resolveTarget();
     if (!target) {
+      this._queueWechatFiles(opts.wechatFiles);
       await this.wechat.reply(msg, this._noActiveSessionMessage());
       return;
     }
 
+    const wechatFiles = Array.isArray(opts.wechatFiles) ? opts.wechatFiles : [];
+    const textWithWechatFiles = wechatFiles.length ? appendWechatFilesContext(text, wechatFiles) : text;
+
     if (!opts.skipDisambiguation && this._shouldAskTargetChoice(target.pid)) {
-      await this._askTargetChoice(text, msg);
+      await this._askTargetChoice(text, msg, wechatFiles);
       return;
     }
 
+    let injected = false;
     try {
       const choiceLike = !opts.forcePlainInput && this._isChoiceLike(text);
       if (choiceLike) {
         await this._refreshPendingInteraction(target.pid);
       }
 
-      const quickReply = opts.forcePlainInput ? null : this._resolveInteractionReply(text, target.pid);
-      const payload = quickReply?.value || this._appendCapabilityContext(text, target, {
+      let quickReply = opts.forcePlainInput ? null : this._resolveInteractionReply(text, target.pid);
+      if (!quickReply && !opts.forcePlainInput) {
+        quickReply = await this._resolvePermissionShortcutFromScreen(text, target.pid);
+      }
+      if (quickReply && wechatFiles.length) {
+        this._queueWechatFiles(wechatFiles);
+      }
+      const payload = quickReply?.value || this._appendCapabilityContext(textWithWechatFiles, target, {
         choiceLike,
         forcePlainInput: opts.forcePlainInput,
       });
@@ -137,6 +262,7 @@ export class Bridge {
       } else {
         await injectInput(target.pid, payload);
       }
+      injected = true;
 
       if (quickReply && quickReply.mode !== 'keys') {
         this.pendingInteractions.delete(target.pid);
@@ -166,6 +292,7 @@ export class Bridge {
         suffix,
       ].filter(Boolean).join('\n'));
     } catch (e) {
+      if (!injected) this._queueWechatFiles(wechatFiles);
       await this.wechat.reply(msg, `❌ 发送失败\n原因: ${e.message}`);
     }
   }
@@ -619,11 +746,13 @@ export class Bridge {
 
     if (Date.now() > pending.expiresAt) {
       this.pendingTargetChoice = null;
+      this._queueWechatFiles(pending.wechatFiles);
       return false;
     }
 
     if (text === '/cancel' || text === '取消') {
       this.pendingTargetChoice = null;
+      this._queueWechatFiles(pending.wechatFiles);
       await this.wechat.reply(msg, '✅ 已取消本次会话选择。');
       return true;
     }
@@ -640,6 +769,7 @@ export class Bridge {
     await this._handleReply(originalText, msg, {
       targetPid: selected.pid,
       skipDisambiguation: true,
+      wechatFiles: pending.wechatFiles,
     });
     return true;
   }
@@ -662,11 +792,12 @@ export class Bridge {
     return true;
   }
 
-  async _handlePendingNewTabLaunch(text, msg) {
+  async _handlePendingNewTabLaunch(text, msg, wechatFiles = []) {
     const pending = this.pendingNewTabLaunch;
     if (!pending) return false;
 
     if (text.startsWith('/')) {
+      this._queueWechatFiles(wechatFiles);
       await this.wechat.reply(msg, [
         '⏳ 新 tab 正在启动',
         `目录: ${pending.cwd}`,
@@ -676,6 +807,7 @@ export class Bridge {
     }
 
     if (pending.queued.length >= 10) {
+      this._queueWechatFiles(wechatFiles);
       await this.wechat.reply(msg, [
         '⏳ 新 tab 仍在启动',
         '暂存消息已达到 10 条，这条没有排队。',
@@ -684,7 +816,7 @@ export class Bridge {
       return true;
     }
 
-    pending.queued.push({ text, msg });
+    pending.queued.push({ text, msg, wechatFiles });
     if (!pending.notified) {
       pending.notified = true;
       await this.wechat.reply(msg, [
@@ -740,6 +872,9 @@ export class Bridge {
     if (!launch?.queued?.length) return;
 
     if (!drain) {
+      for (const item of launch.queued) {
+        this._queueWechatFiles(item.wechatFiles);
+      }
       const last = launch.queued[launch.queued.length - 1];
       await this.wechat.reply(last.msg, [
         '⏸️ 暂存消息未发送',
@@ -754,6 +889,7 @@ export class Bridge {
       await this._handleReply(item.text, item.msg, {
         targetPid: launch.readyPid,
         skipDisambiguation: true,
+        wechatFiles: item.wechatFiles,
       });
     }
   }
@@ -780,10 +916,11 @@ export class Bridge {
     }
   }
 
-  async _askTargetChoice(text, msg) {
+  async _askTargetChoice(text, msg, wechatFiles = []) {
     const candidates = this._getPendingNotificationCandidates();
     this.pendingTargetChoice = {
       originalText: text,
+      wechatFiles,
       candidates,
       expiresAt: Date.now() + 30 * 1000,
     };
@@ -1350,6 +1487,30 @@ export class Bridge {
     return resolveQuickReply(text, pending.interaction);
   }
 
+  async _resolvePermissionShortcutFromScreen(text, pid) {
+    if (!isPermissionShortcut(text)) return null;
+
+    let screen = '';
+    try {
+      screen = await readScreen(pid);
+    } catch {
+      return null;
+    }
+    if (!isPermissionLikeScreen(screen)) return null;
+
+    const interaction = normalizeInteraction({
+      event: 'Notification',
+      screenText: screen,
+    });
+    if (interaction?.type !== 'tool_permission') return null;
+
+    this.pendingInteractions.set(pid, {
+      interaction,
+      expiresAt: Date.now() + 10 * 60 * 1000,
+    });
+    return resolveQuickReply(text, interaction);
+  }
+
   async _injectKeySequence(pid, keys) {
     for (const key of keys) {
       await injectKey(pid, key);
@@ -1424,6 +1585,69 @@ function parsePassthroughInput(text) {
   const s = String(text || '').trim();
   if (s.length < 2 || !s.startsWith('<') || !s.endsWith('>')) return null;
   return s.slice(1, -1);
+}
+
+function appendWechatFilesContext(text, files) {
+  const lines = [
+    text,
+    '',
+    '<cc-wechat-files>',
+    'source=wechat',
+    'note=The user sent the following file(s) via WeChat. Use the local absolute paths when relevant.',
+  ];
+  for (const file of files) {
+    lines.push(
+      `<file path="${escapeXmlAttr(file.path)}" name="${escapeXmlAttr(file.name || '')}" kind="${escapeXmlAttr(file.kind || 'file')}" size="${Number(file.size) || 0}" />`,
+    );
+  }
+  lines.push('</cc-wechat-files>');
+  return lines.join('\n');
+}
+
+function dedupeWechatFiles(files) {
+  const seen = new Set();
+  const result = [];
+  for (const file of files) {
+    const key = String(file?.path || '').toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    result.push(file);
+  }
+  return result;
+}
+
+function formatUnhandledWechatItems(items) {
+  return items.slice(0, 5).map((item, index) => {
+    const parts = [
+      `#${index + 1}`,
+      `type=${item.type}`,
+      item.fileName ? `name=${item.fileName}` : '',
+      `hasParam=${item.hasEncryptQueryParam ? 'yes' : 'no'}`,
+      `hasKey=${item.hasAesKey ? 'yes' : 'no'}`,
+    ].filter(Boolean);
+    return `- ${parts.join(' ')}`;
+  });
+}
+
+function escapeXmlAttr(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function isPermissionShortcut(text) {
+  return /^(?:y|yes|n|no|同意|确认|允许|允许运行|执行|拒绝|取消|不允许|否)$/i.test(String(text || '').trim());
+}
+
+function isPermissionLikeScreen(screen) {
+  const text = String(screen || '');
+  if (!text.trim()) return false;
+  const compact = text.toLowerCase().replace(/\s+/g, ' ');
+  const hasPermissionHint = /permission|approve|approval|authorize|allow|deny|tool|bash|edit|write|授权|权限|允许|拒绝|工具/.test(compact);
+  const hasDecisionOptions = /\byes\b|\bno\b|\ballow\b|\bdeny\b|同意|允许|拒绝|不允许|取消/.test(compact);
+  return hasPermissionHint && hasDecisionOptions;
 }
 
 function getActiveCapabilitySet() {

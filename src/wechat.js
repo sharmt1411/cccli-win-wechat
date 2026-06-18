@@ -2,20 +2,30 @@
 import { saveWechat, get as getConfig } from './config.js';
 
 import { EventEmitter } from 'node:events';
-import { createCipheriv, createHash, randomBytes } from 'node:crypto';
-import { readFileSync, statSync } from 'node:fs';
-import { basename } from 'node:path';
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { basename, extname, join, resolve } from 'node:path';
 
 const DEFAULT_MAX_FILE_BYTES = 20 * 1024 * 1024;
+const DEFAULT_MAX_INBOUND_MEDIA_BYTES = 100 * 1024 * 1024;
 const DEFAULT_CDN_BASE_URL = 'https://novac2c.cdn.weixin.qq.com/c2c';
 const CHANNEL_VERSION = '1.0.2';
+const MESSAGE_ITEM_TEXT = 1;
+const MESSAGE_ITEM_IMAGE = 2;
+const MESSAGE_ITEM_VOICE = 3;
 const MESSAGE_ITEM_FILE = 4;
+const MESSAGE_ITEM_VIDEO = 5;
 const UPLOAD_MEDIA_FILE = 3;
 const CDN_UPLOAD_MAX_RETRIES = 3;
 
 function randomUin() {
   const n = (Math.random() * 0xFFFFFFFF) >>> 0;
   return Buffer.from(String(n)).toString('base64');
+}
+
+function formatCursorForLog(value) {
+  const s = String(value || '');
+  return s ? `${s.substring(0, 16)}.../${s.length}` : '空';
 }
 
 function headers(token) {
@@ -35,6 +45,7 @@ export class WeChatBot extends EventEmitter {
     this.baseUrl = cfg.baseUrl || 'https://ilinkai.weixin.qq.com';
     this.token = cfg.botToken || '';
     this.buf = cfg.getUpdatesBuf || '';
+    this.syncBuf = cfg.syncBuf || '';
     this.ownerUserId = cfg.ownerUserId || '';
     this.lastContextToken = cfg.lastContextToken || '';
     this._polling = false;
@@ -117,15 +128,16 @@ export class WeChatBot extends EventEmitter {
     while (this._polling) {
       try {
         pollCount++;
-        console.log(`📡 轮询 #${pollCount} 发送中... (buf=${this.buf ? this.buf.substring(0,20)+'...' : '空'})`);
+        console.log(`📡 轮询 #${pollCount} 发送中... (buf=${formatCursorForLog(this.buf)} sync=${formatCursorForLog(this.syncBuf)})`);
         const data = await this._fetch('/ilink/bot/getupdates', {
           method: 'POST',
           body: JSON.stringify({
             get_updates_buf: this.buf,
+            sync_buf: this.syncBuf,
             base_info: { channel_version: CHANNEL_VERSION },
           }),
         });
-        console.log(`📡 轮询 #${pollCount} 返回: ret=${data.ret} msgs=${data.msgs?.length || 0}`);
+        console.log(`📡 轮询 #${pollCount} 返回: ret=${data.ret} msgs=${data.msgs?.length || 0} nextBuf=${formatCursorForLog(data.get_updates_buf)} nextSync=${formatCursorForLog(data.sync_buf)}`);
 
         // 首次轮询打印完整响应
         if (pollCount === 1) {
@@ -136,12 +148,20 @@ export class WeChatBot extends EventEmitter {
           this.buf = data.get_updates_buf;
           saveWechat({ getUpdatesBuf: this.buf });
         }
+        if (data.sync_buf) {
+          this.syncBuf = data.sync_buf;
+          saveWechat({ syncBuf: this.syncBuf });
+        }
 
         if (data.msgs?.length) {
           console.log(`📨 收到 ${data.msgs.length} 条消息`);
           for (const msg of data.msgs) {
-            const text = msg.item_list?.[0]?.text_item?.text || '';
+            const text = this.extractMessageText(msg) || '';
+            const itemSummary = summarizeMessageItems(msg.item_list);
             console.log(`  ├ type=${msg.message_type} state=${msg.message_state} from=${msg.from_user_id?.substring(0,20)}... text="${text.substring(0,50)}"`);
+            if (itemSummary.length && (!text || itemSummary.some(item => item.mediaLike))) {
+              console.log(`    items=${JSON.stringify(itemSummary).substring(0, 1200)}`);
+            }
             // 只处理用户发来的消息 (message_type=1)
             if (msg.message_type !== 1) continue;
 
@@ -220,6 +240,168 @@ export class WeChatBot extends EventEmitter {
         throw e;
       }
     }
+  }
+
+  extractMessageText(msg) {
+    return bodyFromItemList(msg?.item_list || []);
+  }
+
+  async saveInboundMedia(msg) {
+    const items = Array.isArray(msg?.item_list) ? msg.item_list : [];
+    const files = [];
+    const errors = [];
+    const unhandled = [];
+    const seen = new Set();
+
+    for (const item of items) {
+      try {
+        const media = await this._downloadInboundItem(item, seen);
+        if (media?.skipped) continue;
+        if (!media) {
+          if (isPotentialInboundMediaItem(item)) {
+            unhandled.push(describeInboundItem(item));
+          }
+          continue;
+        }
+        files.push(this._saveInboundFile(media.data, media.name, media.kind));
+      } catch (e) {
+        errors.push(e.message);
+        console.warn('WeChat inbound media failed:', e.message, JSON.stringify(describeInboundItem(item)).substring(0, 1200));
+      }
+    }
+
+    if (unhandled.length) {
+      console.warn('WeChat inbound media skipped:', JSON.stringify(unhandled).substring(0, 2000));
+    }
+    return { files, errors, unhandled };
+  }
+
+  async _downloadInboundItem(item, seen) {
+    const type = Number(item?.type || 0);
+
+    if (type === MESSAGE_ITEM_FILE) {
+      const file = item.file_item;
+      const media = pickCdnMedia(file) || pickCdnMedia(item);
+      const { enc, key } = cdnMaterial(media);
+      if (!enc || !key) return null;
+      if (seen.has(enc)) return { skipped: true };
+      seen.add(enc);
+      return {
+        kind: 'file',
+        name: sanitizeFileName(file?.file_name || findInboundFileName(item), 'attachment.bin'),
+        data: await this._downloadAndDecryptCDN(enc, key, 'weixin inbound file'),
+      };
+    }
+
+    if (type === MESSAGE_ITEM_IMAGE) {
+      const image = item.image_item;
+      const media = pickCdnMedia(image);
+      const { enc } = cdnMaterial(media);
+      if (!enc) return null;
+      if (seen.has(enc)) return { skipped: true };
+      seen.add(enc);
+      const key = inboundImageAesKey(image);
+      const data = key
+        ? await this._downloadAndDecryptCDN(enc, key, 'weixin inbound image')
+        : await this._downloadPlainCDN(enc, 'weixin inbound image');
+      return {
+        kind: 'image',
+        name: `image${extensionFromMime(detectImageMime(data))}`,
+        data,
+      };
+    }
+
+    if (type === MESSAGE_ITEM_VIDEO) {
+      const video = item.video_item;
+      const media = pickCdnMedia(video) || pickCdnMedia(item);
+      const { enc, key } = cdnMaterial(media);
+      if (!enc || !key) return null;
+      if (seen.has(enc)) return { skipped: true };
+      seen.add(enc);
+      return {
+        kind: 'video',
+        name: 'video.mp4',
+        data: await this._downloadAndDecryptCDN(enc, key, 'weixin inbound video'),
+      };
+    }
+
+    if (type === MESSAGE_ITEM_VOICE) {
+      const voice = item.voice_item;
+      if (String(voice?.text || '').trim()) return null;
+      const media = pickCdnMedia(voice) || pickCdnMedia(item);
+      const { enc, key } = cdnMaterial(media);
+      if (!enc || !key) return null;
+      if (seen.has(enc)) return { skipped: true };
+      seen.add(enc);
+      return {
+        kind: 'voice',
+        name: 'voice.silk',
+        data: await this._downloadAndDecryptCDN(enc, key, 'weixin inbound voice'),
+      };
+    }
+
+    if (type !== MESSAGE_ITEM_TEXT) {
+      const media = pickCdnMedia(item);
+      const { enc, key } = cdnMaterial(media);
+      if (enc && key) {
+        if (seen.has(enc)) return { skipped: true };
+        seen.add(enc);
+        return {
+          kind: mediaKindFromType(type),
+          name: sanitizeFileName(findInboundFileName(item), defaultInboundFileName(type)),
+          data: await this._downloadAndDecryptCDN(enc, key, `weixin inbound item type ${type}`),
+        };
+      }
+    }
+
+    return null;
+  }
+
+  async _downloadAndDecryptCDN(encryptedQueryParam, aesKeyBase64, label) {
+    const encrypted = await this._downloadPlainCDN(encryptedQueryParam, label);
+    return decryptAesEcb(encrypted, parseAesKey(aesKeyBase64, label));
+  }
+
+  async _downloadPlainCDN(encryptedQueryParam, label) {
+    const url = buildCdnDownloadURL(
+      getConfig().wechat?.cdnBaseUrl || DEFAULT_CDN_BASE_URL,
+      encryptedQueryParam,
+    );
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 120000);
+    try {
+      const res = await fetch(url, { signal: ac.signal });
+      clearTimeout(timer);
+      if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        throw new Error(`${label}: CDN HTTP ${res.status} ${body.substring(0, 200)}`);
+      }
+      const data = Buffer.from(await res.arrayBuffer());
+      const maxBytes = Number(getConfig().wechat?.maxInboundMediaBytes || DEFAULT_MAX_INBOUND_MEDIA_BYTES);
+      if (data.length > maxBytes) {
+        throw new Error(`${label}: inbound media too large ${data.length} > ${maxBytes}`);
+      }
+      return data;
+    } catch (e) {
+      clearTimeout(timer);
+      throw e;
+    }
+  }
+
+  _saveInboundFile(data, fileName, kind) {
+    const dir = resolveInboundDir(getConfig().wechat?.inboundDir);
+    const datedDir = join(dir, dateStamp());
+    mkdirSync(datedDir, { recursive: true });
+
+    const safeName = normalizeInboundFileName(data, sanitizeFileName(fileName, `${kind || 'attachment'}.bin`));
+    const filePath = uniqueFilePath(datedDir, safeName);
+    writeFileSync(filePath, data);
+    return {
+      path: filePath,
+      name: basename(filePath),
+      size: data.length,
+      kind: kind || 'file',
+    };
   }
 
   async _getUploadURL(toUserId, fileData, mediaType, aesKey, filekey) {
@@ -385,9 +567,33 @@ function encryptAesEcb(buf, key) {
   return Buffer.concat([cipher.update(buf), cipher.final()]);
 }
 
+function decryptAesEcb(buf, key) {
+  const decipher = createDecipheriv('aes-128-ecb', key, null);
+  decipher.setAutoPadding(true);
+  return Buffer.concat([decipher.update(buf), decipher.final()]);
+}
+
+function parseAesKey(aesKeyBase64, label) {
+  const raw = String(aesKeyBase64 || '').trim();
+  if (/^[0-9a-fA-F]{32}$/.test(raw)) {
+    return Buffer.from(raw, 'hex');
+  }
+  const decoded = Buffer.from(raw, 'base64');
+  if (decoded.length === 16) return decoded;
+  if (decoded.length === 32 && /^[0-9a-fA-F]{32}$/.test(decoded.toString('utf8'))) {
+    return Buffer.from(decoded.toString('utf8'), 'hex');
+  }
+  throw new Error(`${label}: invalid aes_key length ${decoded.length}`);
+}
+
 function buildCdnUploadURL(cdnBase, uploadParam, filekey) {
   const base = String(cdnBase || DEFAULT_CDN_BASE_URL).replace(/\/+$/, '');
   return `${base}/upload?encrypted_query_param=${encodeURIComponent(uploadParam)}&filekey=${encodeURIComponent(filekey)}`;
+}
+
+function buildCdnDownloadURL(cdnBase, encryptedQueryParam) {
+  const base = String(cdnBase || DEFAULT_CDN_BASE_URL).replace(/\/+$/, '');
+  return `${base}/download?encrypted_query_param=${encodeURIComponent(encryptedQueryParam)}`;
 }
 
 function formatAesKeyForAPI(key) {
@@ -400,6 +606,199 @@ function mediaFromUploadRef(ref) {
     aes_key: formatAesKeyForAPI(ref.aesKey),
     encrypt_type: 1,
   };
+}
+
+function inboundImageAesKey(image) {
+  const hexKey = String(image?.aeskey || '').trim();
+  if (/^[0-9a-fA-F]{32}$/.test(hexKey)) {
+    return Buffer.from(hexKey, 'hex').toString('base64');
+  }
+  return cdnMaterial(pickCdnMedia(image)).key;
+}
+
+function pickCdnMedia(value, { allowThumb = false, depth = 0 } = {}) {
+  if (!value || typeof value !== 'object' || depth > 6) return null;
+
+  for (const key of ['media', 'cdn_media', 'file_media']) {
+    if (looksLikeCdnMedia(value[key])) return value[key];
+  }
+  if (allowThumb && looksLikeCdnMedia(value.thumb_media)) {
+    return value.thumb_media;
+  }
+  if (looksLikeCdnMedia(value)) return value;
+
+  for (const [key, child] of Object.entries(value)) {
+    if (key === 'ref_msg' || key === 'ref_message' || key === 'quoted_msg') continue;
+    if (!allowThumb && key === 'thumb_media') continue;
+    const found = pickCdnMedia(child, { allowThumb, depth: depth + 1 });
+    if (found) return found;
+  }
+  return null;
+}
+
+function looksLikeCdnMedia(value) {
+  if (!value || typeof value !== 'object') return false;
+  const { enc, key } = cdnMaterial(value);
+  return Boolean(enc || key || value.encrypt_type);
+}
+
+function cdnMaterial(media) {
+  return {
+    enc: String(media?.encrypt_query_param || media?.encrypted_query_param || '').trim(),
+    key: String(media?.aes_key || media?.aeskey || media?.aesKey || '').trim(),
+  };
+}
+
+function isPotentialInboundMediaItem(item) {
+  const type = Number(item?.type || 0);
+  return [MESSAGE_ITEM_IMAGE, MESSAGE_ITEM_VOICE, MESSAGE_ITEM_FILE, MESSAGE_ITEM_VIDEO].includes(type)
+    || Boolean(item?.file_item || item?.image_item || item?.voice_item || item?.video_item)
+    || Boolean(pickCdnMedia(item))
+    || Boolean(findInboundFileName(item));
+}
+
+function describeInboundItem(item) {
+  const media = pickCdnMedia(item, { allowThumb: true });
+  const { enc, key } = cdnMaterial(media);
+  return {
+    type: Number(item?.type || 0),
+    mediaLike: isPotentialInboundMediaItem(item),
+    keys: item && typeof item === 'object' ? Object.keys(item).slice(0, 12) : [],
+    fileName: findInboundFileName(item),
+    len: findFirstStringByKey(item, ['len', 'size', 'file_size']),
+    hasEncryptQueryParam: Boolean(enc),
+    hasAesKey: Boolean(key),
+    mediaKeys: media && typeof media === 'object' ? Object.keys(media).slice(0, 12) : [],
+  };
+}
+
+function summarizeMessageItems(items) {
+  if (!Array.isArray(items)) return [];
+  return items.map(item => {
+    const summary = describeInboundItem(item);
+    if (Number(item?.type) === MESSAGE_ITEM_TEXT) {
+      summary.textLength = String(item?.text_item?.text || '').length;
+    }
+    if (Number(item?.type) === MESSAGE_ITEM_VOICE) {
+      summary.voiceTextLength = String(item?.voice_item?.text || '').length;
+    }
+    return summary;
+  });
+}
+
+function findInboundFileName(value) {
+  return findFirstStringByKey(value, ['file_name', 'filename', 'name', 'title']);
+}
+
+function findFirstStringByKey(value, keys, depth = 0) {
+  if (!value || typeof value !== 'object' || depth > 6) return '';
+  for (const key of keys) {
+    const found = value[key];
+    if (typeof found === 'string' && found.trim()) return found.trim();
+    if (typeof found === 'number' && Number.isFinite(found)) return String(found);
+  }
+  for (const [key, child] of Object.entries(value)) {
+    if (key === 'ref_msg' || key === 'ref_message' || key === 'quoted_msg') continue;
+    const found = findFirstStringByKey(child, keys, depth + 1);
+    if (found) return found;
+  }
+  return '';
+}
+
+function mediaKindFromType(type) {
+  switch (Number(type)) {
+    case MESSAGE_ITEM_IMAGE: return 'image';
+    case MESSAGE_ITEM_VOICE: return 'voice';
+    case MESSAGE_ITEM_VIDEO: return 'video';
+    case MESSAGE_ITEM_FILE: return 'file';
+    default: return 'file';
+  }
+}
+
+function defaultInboundFileName(type) {
+  switch (Number(type)) {
+    case MESSAGE_ITEM_IMAGE: return 'image.bin';
+    case MESSAGE_ITEM_VOICE: return 'voice.silk';
+    case MESSAGE_ITEM_VIDEO: return 'video.mp4';
+    default: return 'attachment.bin';
+  }
+}
+
+function bodyFromItemList(items) {
+  if (!Array.isArray(items)) return '';
+  for (const item of items) {
+    if (Number(item?.type) === MESSAGE_ITEM_TEXT) {
+      const text = String(item?.text_item?.text || '').trim();
+      if (text) return text;
+    }
+    if (Number(item?.type) === MESSAGE_ITEM_VOICE) {
+      const text = String(item?.voice_item?.text || '').trim();
+      if (text) return text;
+    }
+  }
+  return '';
+}
+
+function resolveInboundDir(dir) {
+  const configured = String(dir || './wechat-files').trim() || './wechat-files';
+  return resolve(configured);
+}
+
+function dateStamp(date = new Date()) {
+  const pad = n => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+function sanitizeFileName(name, fallback) {
+  const raw = basename(String(name || fallback || 'attachment.bin')).trim() || fallback || 'attachment.bin';
+  const cleaned = raw
+    .replace(/[<>:"/\\|?*\x00-\x1f]/g, '_')
+    .replace(/\s+/g, ' ')
+    .replace(/^\.+$/, '_');
+  return cleaned.slice(0, 160) || fallback || 'attachment.bin';
+}
+
+function normalizeInboundFileName(data, name) {
+  if (!isEpubArchive(data)) return name;
+  const ext = extname(name).toLowerCase();
+  if (ext === '.epub') return name;
+  const stem = ext ? name.slice(0, -ext.length) : name;
+  return `${stem || 'attachment'}.epub`;
+}
+
+function isEpubArchive(data) {
+  if (!Buffer.isBuffer(data) || data.length < 64) return false;
+  if (data[0] !== 0x50 || data[1] !== 0x4b) return false;
+  const head = data.subarray(0, Math.min(data.length, 1024 * 1024)).toString('latin1');
+  return head.includes('application/epub+zip') || head.includes('META-INF/container.xml');
+}
+
+function uniqueFilePath(dir, name) {
+  const ext = extname(name);
+  const stem = ext ? name.slice(0, -ext.length) : name;
+  let candidate = join(dir, name);
+  for (let i = 1; existsSync(candidate); i++) {
+    candidate = join(dir, `${stem}-${i}${ext}`);
+  }
+  return candidate;
+}
+
+function detectImageMime(buf) {
+  if (buf.length >= 3 && buf[0] === 0xFF && buf[1] === 0xD8 && buf[2] === 0xFF) return 'image/jpeg';
+  if (buf.length >= 8 && buf.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]))) return 'image/png';
+  if (buf.length >= 6 && (buf.subarray(0, 6).toString() === 'GIF87a' || buf.subarray(0, 6).toString() === 'GIF89a')) return 'image/gif';
+  if (buf.length >= 12 && buf.subarray(0, 4).toString() === 'RIFF' && buf.subarray(8, 12).toString() === 'WEBP') return 'image/webp';
+  return 'application/octet-stream';
+}
+
+function extensionFromMime(mime) {
+  switch (mime) {
+    case 'image/jpeg': return '.jpg';
+    case 'image/png': return '.png';
+    case 'image/gif': return '.gif';
+    case 'image/webp': return '.webp';
+    default: return '.bin';
+  }
 }
 
 function splitText(text, maxLen) {

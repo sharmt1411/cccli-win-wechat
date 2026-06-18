@@ -4,3 +4,4 @@ node_modules/
 .agent
 config.json
 /dist
+wechat-files/

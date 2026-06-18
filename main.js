@@ -184,7 +184,7 @@ ipcMain.handle('config:setAutoStart', (event, enable) => {
 });
 
 ipcMain.handle('config:clearToken', () => {
-  saveConfig({ wechat: { botToken: '', baseUrl: '', getUpdatesBuf: '', ownerUserId: '', lastContextToken: '' } });
+  saveConfig({ wechat: { botToken: '', baseUrl: '', getUpdatesBuf: '', syncBuf: '', ownerUserId: '', lastContextToken: '' } });
   app.relaunch();
   app.quit();
 });
