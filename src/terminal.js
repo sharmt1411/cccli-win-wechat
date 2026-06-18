@@ -1,7 +1,7 @@
 // terminal.js — Windows 终端操作
 import { execFile, exec } from 'node:child_process';
-import { existsSync, readFileSync, unlinkSync } from 'node:fs';
-import { randomUUID } from 'node:crypto';
+import { existsSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
+import { randomUUID, createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -11,7 +11,23 @@ import { get as getConfig } from './config.js';
 const execFileAsync = promisify(execFile);
 const execAsync = promisify(exec);
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
-const INJECT_SCRIPT = join(__dirname, '..', 'scripts', 'inject.ps1');
+const pathHash = createHash('md5').update(__dirname).digest('hex').slice(0, 8);
+
+// Extract scripts from ASAR to TEMP so PowerShell can read them
+const extractScript = (scriptName) => {
+  const asarPath = join(__dirname, '..', 'scripts', scriptName);
+  const destPath = join(tmpdir(), `cc-wechat-${pathHash}-${scriptName}`);
+  try {
+    const content = readFileSync(asarPath, 'utf8');
+    writeFileSync(destPath, content, 'utf8');
+  } catch (e) {
+    console.error(`Failed to extract ${scriptName} to ${destPath}:`, e.message);
+  }
+  return destPath;
+};
+
+const INJECT_SCRIPT = extractScript('inject.ps1');
+const READ_SCREEN_SCRIPT = extractScript('read-screen.ps1');
 
 /**
  * 向目标 CC 会话注入文本输入
@@ -103,7 +119,7 @@ export async function injectKey(pid, keyName) {
   return new Promise((resolve, reject) => {
     execFile(
       'powershell',
-      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', join(__dirname, '..', 'scripts', 'inject.ps1'), '-TargetPid', pid.toString(), '-Key', keyName],
+      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', INJECT_SCRIPT, '-TargetPid', pid.toString(), '-Key', keyName],
       { encoding: 'utf8' },
       (err, stdout, stderr) => {
         if (err) return reject(new Error(stderr || err.message));
@@ -121,7 +137,7 @@ export async function readScreen(pid) {
   return new Promise((resolve, reject) => {
     execFile(
       'powershell',
-      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', join(__dirname, '..', 'scripts', 'read-screen.ps1'), '-TargetPid', pid.toString()],
+      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', READ_SCREEN_SCRIPT, '-TargetPid', pid.toString()],
       { encoding: 'utf8', timeout: 5000 },
       (err, stdout, stderr) => {
         if (err) return reject(new Error(stderr || err.message));

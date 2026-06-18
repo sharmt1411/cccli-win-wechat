@@ -746,7 +746,8 @@ function bodyFromItemList(items) {
 
 function resolveInboundDir(dir) {
   const configured = String(dir || './wechat-files').trim() || './wechat-files';
-  return resolve(configured);
+  const baseDir = (process.versions && process.versions.electron) ? (process.env.PORTABLE_EXECUTABLE_DIR || process.cwd()) : process.cwd();
+  return resolve(baseDir, configured);
 }
 
 function dateStamp(date = new Date()) {

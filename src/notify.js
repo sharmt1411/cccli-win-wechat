@@ -15,7 +15,8 @@ export class NotifyWatcher {
   constructor(wechat, onNotify) {
     this.wechat = wechat;
     this.onNotify = onNotify;
-    this.dir = getConfig().notifyDir;
+    const baseDir = (process.versions && process.versions.electron) ? (process.env.PORTABLE_EXECUTABLE_DIR || process.cwd()) : process.cwd();
+    this.dir = resolve(baseDir, getConfig().notifyDir);
     this._watcher = null;
     this._processing = new Set();
   }

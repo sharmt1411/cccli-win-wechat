@@ -1,5 +1,5 @@
 // setup.js — 安装向导：扫描 Claude 目录、注入 hook、iLink 扫码登录
-import { readdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { readdirSync, readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
@@ -112,13 +112,21 @@ export function injectHook(claudeDir) {
 
   if (!settings.hooks) settings.hooks = {};
 
-  const scriptPath = HOOK_SCRIPT.replace(/\\/g, '/');
   const claudeDirNorm = claudeDir.replace(/\\/g, '/');
   
+  // Extract hook script to physical disk because PowerShell cannot read inside app.asar
+  const hooksDir = join(claudeDir, 'hooks');
+  if (!existsSync(hooksDir)) {
+    mkdirSync(hooksDir, { recursive: true });
+  }
+  const destScriptPath = join(hooksDir, 'cc-wechat-notify.ps1').replace(/\\/g, '/');
+  const scriptContent = readFileSync(HOOK_SCRIPT, 'utf-8');
+  writeFileSync(destScriptPath, scriptContent, 'utf-8');
+
   const baseDir = (process.versions && process.versions.electron) ? (process.env.PORTABLE_EXECUTABLE_DIR || process.cwd()) : process.cwd();
   const absNotifyDir = resolve(baseDir, cfg.notifyDir).replace(/\\/g, '/');
 
-  const hookCommand = `powershell -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create([IO.File]::ReadAllText('${scriptPath}',[Text.Encoding]::UTF8))) -ClaudeDir '${claudeDirNorm}' -NotifyDir '${absNotifyDir}'"`;
+  const hookCommand = `powershell -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create([IO.File]::ReadAllText('${destScriptPath}',[Text.Encoding]::UTF8))) -ClaudeDir '${claudeDirNorm}' -NotifyDir '${absNotifyDir}'"`;
 
   const hookEntry = {
     type: 'command',
@@ -126,7 +134,6 @@ export function injectHook(claudeDir) {
     timeout: 10,
   };
 
-  const marker = 'hook-notify.ps1';
   let modified = false;
 
   for (const event of ['Stop', 'Notification']) {
@@ -134,7 +141,7 @@ export function injectHook(claudeDir) {
     let list = settings.hooks[event];
 
     const newList = list.filter(item => {
-      const isOldHook = JSON.stringify(item).includes(marker);
+      const isOldHook = JSON.stringify(item).includes('hook-notify.ps1') || JSON.stringify(item).includes('cc-wechat-notify.ps1');
       return !isOldHook;
     });
 
