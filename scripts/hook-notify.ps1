@@ -1,7 +1,9 @@
 # hook-notify.ps1 — CC hook -> write notify file
 # Called via: powershell -Command "& ([scriptblock]::Create([IO.File]::ReadAllText(...))) -ClaudeDir ..."
-param([string]$ClaudeDir = '')
-
+param(
+    [string]$ClaudeDir = '',
+    [string]$NotifyDir = ''
+)
 $logFile = Join-Path $env:TEMP 'cc-wechat-hook.log'
 function Log([string]$m) {
     try { Add-Content -LiteralPath $logFile -Value ((Get-Date).ToString('HH:mm:ss') + '  ' + $m) -Encoding UTF8 } catch {}
@@ -134,7 +136,10 @@ function StripSendDirectiveText([string]$text) {
     return $cleanText.Trim()
 }
 
-$notifyDir = Join-Path $env:TEMP 'cc-wechat-notify'
+if ([string]::IsNullOrWhiteSpace($NotifyDir)) {
+    $NotifyDir = Join-Path $env:TEMP 'cc-wechat-notify'
+}
+$notifyDir = $NotifyDir
 
 try {
     # Read stdin - try multiple methods

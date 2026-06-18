@@ -1,6 +1,6 @@
 // index.js — 入口：安装 / 启动服务
 import { isConfigured, load as loadConfig } from './config.js';
-import { runSetup } from './setup.js';
+import { runSetup, ensureHooks } from './setup.js';
 import { WeChatBot } from './wechat.js';
 import { Bridge } from './bridge.js';
 import { NotifyWatcher } from './notify.js';
@@ -19,6 +19,8 @@ async function main() {
 
   // 启动服务
   console.log('\n🚀 cc-wechat 启动中...\n');
+
+  ensureHooks();
 
   const bot = new WeChatBot();
   const bridge = new Bridge(bot);

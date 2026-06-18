@@ -102,7 +102,8 @@ export async function runSetup() {
 }
 
 /** 向目标 Claude 目录的 settings.json 注入 hook */
-function injectHook(claudeDir) {
+export function injectHook(claudeDir) {
+  const cfg = loadConfig();
   const settingsPath = join(claudeDir, 'settings.json');
   let settings = {};
   try {
@@ -113,8 +114,11 @@ function injectHook(claudeDir) {
 
   const scriptPath = HOOK_SCRIPT.replace(/\\/g, '/');
   const claudeDirNorm = claudeDir.replace(/\\/g, '/');
+  
+  const baseDir = (process.versions && process.versions.electron) ? (process.env.PORTABLE_EXECUTABLE_DIR || process.cwd()) : process.cwd();
+  const absNotifyDir = resolve(baseDir, cfg.notifyDir).replace(/\\/g, '/');
 
-  const hookCommand = `powershell -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create([IO.File]::ReadAllText('${scriptPath}',[Text.Encoding]::UTF8))) -ClaudeDir '${claudeDirNorm}'"`;
+  const hookCommand = `powershell -NoProfile -ExecutionPolicy Bypass -Command "& ([scriptblock]::Create([IO.File]::ReadAllText('${scriptPath}',[Text.Encoding]::UTF8))) -ClaudeDir '${claudeDirNorm}' -NotifyDir '${absNotifyDir}'"`;
 
   const hookEntry = {
     type: 'command',
@@ -122,24 +126,42 @@ function injectHook(claudeDir) {
     timeout: 10,
   };
 
-  // 检查是否已注入（通过匹配 hook-notify.ps1）
   const marker = 'hook-notify.ps1';
+  let modified = false;
 
   for (const event of ['Stop', 'Notification']) {
     if (!settings.hooks[event]) settings.hooks[event] = [];
-    const list = settings.hooks[event];
+    let list = settings.hooks[event];
 
-    // hooks 结构可以是 [{hooks: [...]}] 或 [{type, command}]
-    // Claude Code 的格式是 [{hooks: [{type, command}]}]
-    const alreadyInjected = JSON.stringify(list).includes(marker);
+    const newList = list.filter(item => {
+      const isOldHook = JSON.stringify(item).includes(marker);
+      return !isOldHook;
+    });
 
-    if (!alreadyInjected) {
-      list.push({ hooks: [hookEntry] });
-      console.log(`  ✅ ${event} hook → ${claudeDir}`);
+    newList.push({ hooks: [hookEntry] });
+
+    if (JSON.stringify(list) !== JSON.stringify(newList)) {
+      settings.hooks[event] = newList;
+      modified = true;
+      console.log(`  ✅ ${event} hook 已更新 → ${claudeDir}`);
     } else {
-      console.log(`  ⏭️  ${event} hook 已存在 → ${claudeDir}`);
+      console.log(`  ⏭️  ${event} hook 无需更新 → ${claudeDir}`);
     }
   }
 
-  writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf-8');
+  if (modified) {
+    writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf-8');
+  }
+}
+
+export function ensureHooks() {
+  const cfg = loadConfig();
+  if (!cfg.claudeDirs) return;
+  for (const dir of cfg.claudeDirs) {
+    try {
+      injectHook(dir);
+    } catch(e) {
+      console.error(`自动更新 hook 失败 (${dir}):`, e.message);
+    }
+  }
 }

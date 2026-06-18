@@ -255,6 +255,14 @@
           <input type="checkbox" id="cfg-autoStart" />
           开机自启
         </label>
+      <div class="form-section">自定义</div>
+      <div class="form-group">
+        <label>机器人别名 (Bot Alias)</label>
+        <input type="text" id="cfg-botAlias" placeholder="Claude" />
+      </div>
+      <div class="form-group">
+        <label>新标签页启动命令</label>
+        <input type="text" id="cfg-terminalCommand" placeholder="claude" />
       </div>
       <div class="form-section">能力</div>
       <div class="form-group">
@@ -314,6 +322,8 @@
         document.getElementById('cfg-claudeDirs').value = (config.claudeDirs || []).join(',');
         document.getElementById('cfg-lockScreenMode').checked = config.lockScreenMode?.enabled || false;
         document.getElementById('cfg-autoStart').checked = autoStart;
+        document.getElementById('cfg-botAlias').value = config.botAlias || 'Claude';
+        document.getElementById('cfg-terminalCommand').value = config.terminalCommand || 'claude';
         document.getElementById('cfg-capability-sendFile').checked = config.capabilityInjection?.capabilities?.sendFile || false;
       } else {
         // 返回主视图
@@ -328,11 +338,15 @@
       const dirs = dirsInput.split(',').map(s => s.trim().replace(/\\/g, '/')).filter(Boolean);
       const lockScreenEnabled = document.getElementById('cfg-lockScreenMode').checked;
       const autoStart = document.getElementById('cfg-autoStart').checked;
+      const botAlias = document.getElementById('cfg-botAlias').value.trim() || 'Claude';
+      const terminalCommand = document.getElementById('cfg-terminalCommand').value.trim() || 'claude';
       const sendFileCapability = document.getElementById('cfg-capability-sendFile').checked;
       const capabilityInjection = currentConfig.capabilityInjection || {};
 
       await window.electronAPI.saveConfig({
         claudeDirs: dirs,
+        botAlias,
+        terminalCommand,
         lockScreenMode: { enabled: lockScreenEnabled, idleGraceSeconds: 5 },
         capabilityInjection: {
           ...capabilityInjection,

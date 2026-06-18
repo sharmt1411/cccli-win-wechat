@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 
 // 导入原有的核心业务
 import { isConfigured, load as loadConfig, get as getConfig, save as saveConfig } from './src/config.js';
-import { runSetup } from './src/setup.js';
+import { runSetup, ensureHooks } from './src/setup.js';
 import { WeChatBot } from './src/wechat.js';
 import { Bridge } from './src/bridge.js';
 import { NotifyWatcher } from './src/notify.js';
@@ -131,6 +131,8 @@ async function startWeChatService() {
 
   bot = new WeChatBot();
   bridge = new Bridge(bot);
+
+  ensureHooks();
 
   // 暴露事件给前端
   bot.on('qrcode', async (qr) => {

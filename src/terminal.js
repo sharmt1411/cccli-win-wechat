@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { get as getConfig } from './config.js';
 
 const execFileAsync = promisify(execFile);
 const execAsync = promisify(exec);
@@ -51,8 +52,8 @@ export async function newTab({ cwd, taskDescription, claudeDir }) {
       ? `$env:CLAUDE_CONFIG_DIR = ${psQuote(claudeDir)}`
       : '',
     taskDescription
-      ? `claude ${psQuote(taskDescription)}`
-      : 'claude',
+      ? `${getConfig().terminalCommand || 'claude'} ${psQuote(taskDescription)}`
+      : (getConfig().terminalCommand || 'claude'),
   ].filter(Boolean).join('; ');
 
   const encodedCommand = Buffer.from(command, 'utf16le').toString('base64');
@@ -60,7 +61,6 @@ export async function newTab({ cwd, taskDescription, claudeDir }) {
   args.push(
     'powershell.exe',
     '-NoExit',
-    '-NoProfile',
     '-ExecutionPolicy',
     'Bypass',
     '-EncodedCommand',

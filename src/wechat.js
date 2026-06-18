@@ -226,7 +226,12 @@ export class WeChatBot extends EventEmitter {
   }
 
   async send(toUserId, contextToken, text) {
-    const chunks = splitText(text, 2000);
+    let resultText = String(text);
+    const alias = getConfig().botAlias || 'Claude';
+    if (alias && alias.toLowerCase() !== 'claude') {
+      resultText = resultText.replace(/Claude Code/gi, alias).replace(/Claude/gi, alias);
+    }
+    const chunks = splitText(resultText, 2000);
     for (const chunk of chunks) {
       console.log(`📤 发送中... to=${toUserId?.substring(0,20)}... ctx=${contextToken ? '有' : '无'} len=${chunk.length}`);
       try {
