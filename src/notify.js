@@ -333,8 +333,18 @@ function validateSendFileRequest(data, request) {
     : resolve(baseReal, request.path);
   const fileReal = realpathSync(candidate);
 
-  if (!isInsidePath(baseReal, fileReal)) {
-    throw new Error(`路径不在会话目录内: ${request.path}`);
+  let inboundReal = null;
+  try {
+    const appBaseDir = (process.versions && process.versions.electron) ? (process.env.PORTABLE_EXECUTABLE_DIR || process.cwd()) : process.cwd();
+    const inboundConfig = getConfig().wechat?.inboundDir || './wechat-files';
+    inboundReal = realpathSync(resolve(appBaseDir, inboundConfig));
+  } catch {}
+
+  const isInsideSession = isInsidePath(baseReal, fileReal);
+  const isInsideInbound = inboundReal && isInsidePath(inboundReal, fileReal);
+
+  if (!isInsideSession && !isInsideInbound) {
+    throw new Error(`安全限制：请求发送的文件 (${request.path}) 既不在当前 Claude 工作区内，也不在微信接收文件目录内。`);
   }
 
   if (isBlockedSensitivePath(baseReal, fileReal)) {

@@ -1836,6 +1836,7 @@ function buildCapabilityContext(capabilities) {
     lines.push(
       '<capability name="send_file">',
       'When the user explicitly asks to send a file to WeChat, create or verify it first.',
+      'Security restriction: You can ONLY send files located inside your current working directory OR inside the WeChat files directory (usually ./wechat-files). Paths outside these two directories will be rejected.',
       'End the final reply with a fenced block named cc-wechat-send containing JSON:',
       '{"send-cc-wechat-files":[{"path":"relative/or/absolute/path","caption":"optional"}]}',
       'Only include files you created or files the user explicitly named.',
