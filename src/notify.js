@@ -192,6 +192,7 @@ export class NotifyWatcher {
 }
 
 const MAX_SEND_FILE_BYTES = 20 * 1024 * 1024;
+const SEND_FILES_KEY = 'send-cc-wechat-files';
 const SEND_BLOCK_PATTERN = /```cc-wechat-send\s*([\s\S]*?)\s*```/gi;
 const JSON_BLOCK_PATTERN = /```(?:json)?\s*([\s\S]*?)\s*```/gi;
 const CC_WECHAT_CONTEXT_PATTERN = /\s*<cc-wechat-context\b[^>]*>[\s\S]*?<\/cc-wechat-context>\s*/gi;
@@ -233,8 +234,8 @@ function collectSendRequests(data = {}) {
   for (const block of blocks) {
     try {
       const value = JSON.parse(block.body);
-      if (!block.strict && !looksLikeSendDirective(value)) continue;
-      requests.push(...normalizeSendDirective(value));
+      if (!looksLikeSendDirective(value, { allowLegacy: block.strict })) continue;
+      requests.push(...normalizeSendDirective(value, { allowLegacy: block.strict }));
     } catch (e) {
       if (block.strict) {
       requests.push({ error: `cc-wechat-send JSON 解析失败: ${e.message}` });
@@ -244,15 +245,17 @@ function collectSendRequests(data = {}) {
   return requests;
 }
 
-function normalizeSendDirective(value) {
-  const root = Array.isArray(value) ? { files: value } : value;
+function normalizeSendDirective(value, { allowLegacy = true } = {}) {
+  const root = Array.isArray(value) ? { [SEND_FILES_KEY]: value } : value;
   if (!root || typeof root !== 'object') {
     return [{ error: 'cc-wechat-send 内容必须是 JSON 对象' }];
   }
 
-  const files = Array.isArray(root.files)
-    ? root.files
-    : (root.path ? [root] : []);
+  const files = Array.isArray(root[SEND_FILES_KEY])
+    ? root[SEND_FILES_KEY]
+    : (allowLegacy && Array.isArray(root.files)
+        ? root.files
+        : (allowLegacy && root.path ? [root] : []));
   if (!files.length) return [{ error: 'cc-wechat-send 缺少 files 数组' }];
 
   return files.map(item => {
@@ -308,8 +311,10 @@ function extractWholeJsonDirective(text = '') {
   return trimmed;
 }
 
-function looksLikeSendDirective(value) {
+function looksLikeSendDirective(value, { allowLegacy = true } = {}) {
   if (!value || typeof value !== 'object') return false;
+  if (Array.isArray(value[SEND_FILES_KEY])) return true;
+  if (!allowLegacy) return false;
   if (Array.isArray(value)) {
     return value.some(item => typeof item === 'string' || Boolean(item?.path));
   }

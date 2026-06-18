@@ -1453,7 +1453,7 @@ function buildCapabilityContext(capabilities) {
       '<capability name="send_file">',
       'When the user explicitly asks to send a file to WeChat, create or verify it first.',
       'End the final reply with a fenced block named cc-wechat-send containing JSON:',
-      '{"files":[{"path":"relative/or/absolute/path","caption":"optional"}]}',
+      '{"send-cc-wechat-files":[{"path":"relative/or/absolute/path","caption":"optional"}]}',
       'Only include files you created or files the user explicitly named.',
       '</capability>',
     );

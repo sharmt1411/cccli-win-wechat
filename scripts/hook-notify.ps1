@@ -109,14 +109,14 @@ function ExtractSendDirectives([string]$text) {
     )
     foreach ($m in $jsonMatches) {
         $body = [string]$m.Groups[1].Value
-        if ((-not [string]::IsNullOrWhiteSpace($body)) -and (($body -match '"files"\s*:') -or ($body -match '"path"\s*:'))) {
+        if ((-not [string]::IsNullOrWhiteSpace($body)) -and ($body -match '"send-cc-wechat-files"\s*:')) {
             $items += $body.Trim()
         }
     }
     if ($items.Count -gt 0) { return $items }
 
     $trimmed = $cleanText.Trim()
-    if (($trimmed -match '^[\{\[]') -and (($trimmed -match '"files"\s*:') -or ($trimmed -match '"path"\s*:'))) {
+    if (($trimmed -match '^[\{\[]') -and ($trimmed -match '"send-cc-wechat-files"\s*:')) {
         $items += $trimmed
     }
     return $items
