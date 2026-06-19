@@ -288,7 +288,10 @@ try {
     }
 
     if ($lastPrompt.Length -gt 200) { $lastPrompt = $lastPrompt.Substring(0, 200) + '...' }
-    if ($lastReply.Length -gt 500) { $lastReply = $lastReply.Substring(0, 500) + '...' }
+    # Stop（执行完成）的最终回复需完整保留，由 JS 侧的 splitText 自动分条发送；
+    # Notification 以界面信息为主，JS 侧会再截断到 600，这里给个较宽上限即可。
+    $replyCap = if ($evt -eq 'Stop') { 8000 } else { 2000 }
+    if ($lastReply.Length -gt $replyCap) { $lastReply = $lastReply.Substring(0, $replyCap) + '...' }
     if ($title.Length -gt 80) { $title = $title.Substring(0, 80) + '...' }
 
     # Find PID

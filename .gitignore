@@ -6,3 +6,5 @@ config.json
 /dist
 wechat-files/
 cc-wechat-notify/
+cc-wechat.lock
+.claude/
