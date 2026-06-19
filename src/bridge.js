@@ -870,16 +870,25 @@ export class Bridge {
       return true;
     }
 
-    const ready = this._findNewTabSession(pending);
-    if (ready && !this._isTrustPrompt(await readScreen(pending.pid).catch(() => ''))) {
+    // 信任界面已消失（信任已通过）：立刻解除等待，让消息正常发往会话，避免卡死在信任等待里。
+    // 定位到会话就绑定会话 pid；定位不到则用新 tab 的控制台 pid 兜底（注入按 console 走，pid 取得到即可）。
+    // screen 必须非空，否则读屏失败会被误判为"信任已过"。
+    const screen = await readScreen(pending.pid).catch(() => '');
+    if (screen && !this._isTrustPrompt(screen)) {
+      const ready = this._findNewTabSession(pending);
+      const targetPid = ready?.pid || pending.pid;
       this.pendingNewTabTrust = null;
-      this.currentTarget = ready.pid;
-      this.lastNotifiedPid = ready.pid;
-      await this.wechat.reply(msg, [
-        '✅ 新 tab 已就绪',
-        this._formatTargetLines(ready),
-        pending.taskDescription ? `任务: ${pending.taskDescription}` : '',
-      ].filter(Boolean).join('\n'));
+      this.currentTarget = targetPid;
+      this.lastNotifiedPid = targetPid;
+      if (ready) {
+        await this.wechat.reply(msg, [
+          '✅ 新 tab 已就绪',
+          this._formatTargetLines(ready),
+          pending.taskDescription ? `任务: ${pending.taskDescription}` : '',
+        ].filter(Boolean).join('\n'));
+      }
+      await this._flushNewTabLaunchNotifications(pending);
+      await this._flushNewTabLaunchQueue({ queued: pending.queued, readyPid: targetPid }, { drain: true, reason: '' });
       return false;
     }
 
@@ -947,6 +956,26 @@ export class Bridge {
       session ||= await this._waitForNewSession(pending.cwd, pending.beforePids, 20000);
       if (!session) {
         const screen = await readScreen(pending.pid).catch(() => '');
+
+        // 兜底：屏幕已不是信任界面（信任已通过、Claude 已在提示符），但仍扫描不到会话文件时，
+        // 直接以新 tab 的控制台 PID 作为当前目标，保证后续输入能进终端，避免反复空按 Enter 的死循环。
+        // 必须确认 screen 非空，否则读屏失败（空串）会被误判为"信任已过"。
+        if (screen && !this._isTrustPrompt(screen)) {
+          this.pendingNewTabTrust = null;
+          this.currentTarget = pending.pid;
+          this.lastNotifiedPid = pending.pid;
+          await this.wechat.reply(msg, [
+            silentEnter ? '🆕 已打开新 tab，目录信任已确认' : '✅ 已确认目录信任，新 tab 已就绪',
+            `目录: ${pending.cwd}`,
+            pending.taskDescription ? `任务: ${pending.taskDescription}` : '',
+            '提示: 会话元数据稍后生成，期间 /last 可能不可用，可用 /ls 重新选择。',
+            this._screenSuffix(screen),
+          ].filter(Boolean).join('\n'));
+          await this._flushNewTabLaunchNotifications(pending);
+          await this._flushNewTabLaunchQueue({ queued: pending.queued, readyPid: pending.pid }, { drain: true, reason: '' });
+          return true;
+        }
+
         pending.expiresAt = Date.now() + 10 * 60 * 1000;
         this.pendingNewTabTrust = pending;
         await this.wechat.reply(msg, [
@@ -1468,10 +1497,10 @@ export class Bridge {
     if (pending.autoTrust) lines.push('信任: 启动后自动确认');
     if (totalPages > 1) lines.push(`页码: ${page + 1}/${totalPages}`);
     lines.push('');
-    lines.push('[0] 使用当前目录');
+    lines.push('0. 使用当前目录');
     lines.push(`.. 返回上一级: ${dirname(pending.currentDir)}`);
     children.forEach((child, index) => {
-      lines.push(`[${index + 1}] ${child.name}`);
+      lines.push(`${index + 1}. ${child.name}`);
     });
     lines.push('');
     lines.push('操作: 序号进入目录。');
@@ -1490,8 +1519,9 @@ export class Bridge {
       `路径: ${pending.candidatePath}`,
       pending.taskDescription ? `任务: ${pending.taskDescription}` : '',
       '',
-      '[1] 创建并新开 tab',
-      '[2] 返回目录选择',
+      '回复数字选择:',
+      '1. 创建并新开 tab',
+      '2. 返回目录选择',
       '',
       '取消: 发送 /cancel。',
     ].filter(Boolean).join('\n');
@@ -1567,8 +1597,10 @@ export class Bridge {
   }
 
   _samePath(a, b) {
-    return String(a || '').replace(/[\\/]+$/, '').toLowerCase()
-      === String(b || '').replace(/[\\/]+$/, '').toLowerCase();
+    // 归一化所有斜杠（\ 与 / 混用）、去尾斜杠、忽略大小写，
+    // 否则新会话的 cwd（如 D:/x）与待匹配的 cwd（如 D:\x）会比不相等，导致定位失败。
+    const norm = (p) => String(p || '').replace(/[\\/]+/g, '/').replace(/\/+$/, '').toLowerCase();
+    return norm(a) === norm(b);
   }
 
   _isTrustPrompt(screen = '') {
