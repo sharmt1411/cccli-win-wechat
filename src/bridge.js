@@ -30,6 +30,9 @@ export class Bridge {
     this.notificationSeq = 0;
     this.capabilityInjectionState = new Map();
     this.pendingWechatFiles = [];
+    // 本桥接开启、但 Claude 尚未注册会话文件（首轮对话后才注册）的新 tab。
+    // 用控制台 pid 寻址，纳入 /ls、/to 与目标解析；注册后自动并入真实会话。
+    this.pendingTabs = [];
   }
 
   /** 由 NotifyWatcher 调用，更新最后通知的会话；返回 false 可暂缓推送 */
@@ -221,7 +224,16 @@ export class Bridge {
   // ── 普通文本 → 注入到目标 CC ──
 
   async _handleReply(text, msg, opts = {}) {
-    const target = opts.targetPid ? this.sessions.findByPid(opts.targetPid) : this._resolveTarget();
+    let target;
+    if (opts.targetPid) {
+      target = this.sessions.findByPid(opts.targetPid);
+      if (!target) {
+        const t = this.pendingTabs.find(t => t.consolePid === opts.targetPid);
+        if (t) target = this._pendingTabToSession(t);
+      }
+    } else {
+      target = this._resolveTarget();
+    }
     if (!target) {
       this._queueWechatFiles(opts.wechatFiles);
       await this.wechat.reply(msg, this._noActiveSessionMessage());
@@ -346,7 +358,7 @@ export class Bridge {
 
   /** /ls — 列出活跃会话 */
   async _cmdList(msg) {
-    const list = this.sessions.listActive();
+    const list = this._targetableList();
     if (!list.length) {
       await this.wechat.reply(msg, this._noActiveSessionMessage());
       return;
@@ -367,6 +379,7 @@ export class Bridge {
     lines.push('');
     lines.push('切换: 发送 /to N，例如 /to 2。');
     lines.push('发送文本会进入“当前”会话。');
+    if (list.some(s => s.isPending)) lines.push('注: 标“新建·待首条消息”的会话发首条后才会完整注册。');
 
     await this.wechat.reply(msg, lines.join('\n'));
   }
@@ -374,7 +387,7 @@ export class Bridge {
   /** /to N — 切换目标会话 */
   async _cmdTo(n, msg) {
     const idx = parseInt(n) - 1;
-    const list = this.sessions.listActive();
+    const list = this._targetableList();
     if (isNaN(idx) || idx < 0 || idx >= list.length) {
       await this.wechat.reply(msg, `❌ 会话序号无效\n当前会话数: ${list.length}\n用法: /to N`);
       return;
@@ -479,12 +492,15 @@ export class Bridge {
         }
 
         holdReason = '未能定位新会话';
+        this._registerPendingTab({ consolePid: launch.consolePid, cwd, taskDescription });
+        this.currentTarget = launch.consolePid;
+        this.lastNotifiedPid = launch.consolePid;
         await this.wechat.reply(msg, [
-          '🆕 已打开新 tab',
+          '🆕 新 tab 已就绪，并设为当前会话',
           `目录: ${cwd}`,
           taskDescription ? `任务: ${taskDescription}` : '',
-          '状态: 未能立即定位新会话',
-          '下一步: 稍后发送 /ls 查看会话列表。',
+          '直接发消息即可进入此会话。',
+          '说明: 发首条消息后它才会完整出现在 /ls。',
         ].filter(Boolean).join('\n'));
         return;
       }
@@ -886,6 +902,9 @@ export class Bridge {
           this._formatTargetLines(ready),
           pending.taskDescription ? `任务: ${pending.taskDescription}` : '',
         ].filter(Boolean).join('\n'));
+      } else {
+        // 信任已过但会话还没注册：登记为待定 tab，用控制台 pid 接收后续输入
+        this._registerPendingTab({ consolePid: pending.pid, cwd: pending.cwd, taskDescription: pending.taskDescription });
       }
       await this._flushNewTabLaunchNotifications(pending);
       await this._flushNewTabLaunchQueue({ queued: pending.queued, readyPid: targetPid }, { drain: true, reason: '' });
@@ -962,13 +981,14 @@ export class Bridge {
         // 必须确认 screen 非空，否则读屏失败（空串）会被误判为"信任已过"。
         if (screen && !this._isTrustPrompt(screen)) {
           this.pendingNewTabTrust = null;
+          this._registerPendingTab({ consolePid: pending.pid, cwd: pending.cwd, taskDescription: pending.taskDescription });
           this.currentTarget = pending.pid;
           this.lastNotifiedPid = pending.pid;
           await this.wechat.reply(msg, [
             silentEnter ? '🆕 已打开新 tab，目录信任已确认' : '✅ 已确认目录信任，新 tab 已就绪',
             `目录: ${pending.cwd}`,
             pending.taskDescription ? `任务: ${pending.taskDescription}` : '',
-            '提示: 会话元数据稍后生成，期间 /last 可能不可用，可用 /ls 重新选择。',
+            '已设为当前会话，直接发消息即可（发首条后才进入 /ls）。',
             this._screenSuffix(screen),
           ].filter(Boolean).join('\n'));
           await this._flushNewTabLaunchNotifications(pending);
@@ -1198,6 +1218,7 @@ export class Bridge {
     if (s === 'idle') return '状态: 🟢 空闲';
     if (s === 'busy' || s === 'running') return '状态: 🟡 运行中';
     if (s === 'error') return '状态: 🔴 异常';
+    if (s === 'pending') return '状态: 🆕 新建·待首条消息';
     return `状态: ⚪ ${status || '未知'}`;
   }
 
@@ -1611,22 +1632,86 @@ export class Bridge {
 
   _resolveTarget() {
     const list = this.sessions.listActive();
-    if (!list.length) return null;
+    this._reconcilePendingTabs(list);
 
-    // 1. 最近推送过通知的（如果仍活跃）
+    if (!list.length && !this.pendingTabs.length) return null;
+
+    // 1. 最近推送过通知的（已注册会话优先，其次待定 tab）
     if (this.lastNotifiedPid) {
       const s = list.find(s => s.pid === this.lastNotifiedPid);
       if (s) return s;
+      const t = this.pendingTabs.find(t => t.consolePid === this.lastNotifiedPid);
+      if (t) return this._pendingTabToSession(t);
     }
 
-    // 2. 手动选中的（如果仍活跃）
+    // 2. 手动选中的
     if (this.currentTarget) {
       const s = list.find(s => s.pid === this.currentTarget);
       if (s) return s;
+      const t = this.pendingTabs.find(t => t.consolePid === this.currentTarget);
+      if (t) return this._pendingTabToSession(t);
     }
 
-    // 3. updatedAt 最近的
-    return list[0];
+    // 3. updatedAt 最近的已注册会话；都没有则用最近的待定 tab
+    if (list.length) return list[0];
+    return this._pendingTabToSession(this.pendingTabs[this.pendingTabs.length - 1]);
+  }
+
+  /** 已注册会话 + 尚未注册的待定 tab，构成可被 /ls、/to 选择的完整目标列表 */
+  _targetableList() {
+    const list = this.sessions.listActive();
+    this._reconcilePendingTabs(list);
+    return [...list, ...this.pendingTabs.map(t => this._pendingTabToSession(t))];
+  }
+
+  /** 记录一个本桥接开启、尚未注册的新 tab（按控制台 pid 去重） */
+  _registerPendingTab({ consolePid, cwd, taskDescription }) {
+    if (!consolePid) return;
+    this.pendingTabs = this.pendingTabs.filter(t => t.consolePid !== consolePid);
+    this.pendingTabs.push({
+      consolePid,
+      cwd: cwd || '',
+      taskDescription: taskDescription || '',
+      createdAt: Date.now(),
+    });
+  }
+
+  /** 把待定 tab 包装成与会话同构的对象（pid 即控制台 pid，可直接注入） */
+  _pendingTabToSession(t) {
+    return {
+      pid: t.consolePid,
+      cwd: t.cwd,
+      project: t.cwd ? t.cwd.split(/[/\\]/).filter(Boolean).pop() || '' : '',
+      status: 'pending',
+      source: '新建',
+      kind: 'interactive',
+      updatedAt: t.createdAt,
+      isPending: true,
+    };
+  }
+
+  /** 清理失效待定 tab：控制台进程已退出、超时、或对应 cwd 已出现真实会话（首轮后注册） */
+  _reconcilePendingTabs(activeList) {
+    if (!this.pendingTabs.length) return;
+    const list = activeList || this.sessions.listActive();
+    const TTL_MS = 30 * 60 * 1000;
+    this.pendingTabs = this.pendingTabs.filter(t => {
+      if (!this._isPidAlive(t.consolePid)) return false;
+      if (Date.now() - t.createdAt > TTL_MS) return false;
+      const real = list.find(s => this._samePath(s.cwd, t.cwd));
+      if (real) {
+        // 真实会话已注册：把指向控制台 pid 的目标升级为真实会话 pid
+        if (this.currentTarget === t.consolePid) this.currentTarget = real.pid;
+        if (this.lastNotifiedPid === t.consolePid) this.lastNotifiedPid = real.pid;
+        return false;
+      }
+      return true;
+    });
+  }
+
+  _isPidAlive(pid) {
+    if (!pid) return false;
+    try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
   }
 
   _appendCapabilityContext(text, target, { choiceLike = false, forcePlainInput = false } = {}) {

@@ -65,6 +65,10 @@ export async function newTab({ cwd, taskDescription, claudeDir }) {
   const pidFile = join(tmpdir(), `cc-wechat-newtab-${Date.now()}-${randomUUID()}.pid`);
   const command = [
     `$PID | Set-Content -LiteralPath ${psQuote(pidFile)} -Encoding ascii`,
+    // 清掉从 cc-wechat 进程继承来的 Claude 子会话标记（CLAUDE_CODE_CHILD_SESSION/SESSION_ID/CLAUDECODE 等）。
+    // 否则新开的 claude 会以为自己是"子会话"，进入不落盘模式：不写 transcript、不写 sessions 注册文件，
+    // 导致回复无法经 hook 推送、/ls 也扫不到。保留 CLAUDE_CONFIG_DIR（下面按需另行设置）。
+    `Get-ChildItem Env: | Where-Object { $_.Name -like 'CLAUDE_CODE_*' -or $_.Name -eq 'CLAUDECODE' -or $_.Name -eq 'CLAUDE_EFFORT' } | ForEach-Object { Remove-Item -LiteralPath ('Env:' + $_.Name) -ErrorAction SilentlyContinue }`,
     claudeDir && !claudeDir.endsWith('.claude')
       ? `$env:CLAUDE_CONFIG_DIR = ${psQuote(claudeDir)}`
       : '',

@@ -294,6 +294,7 @@ try {
     if ($lastReply.Length -gt $replyCap) { $lastReply = $lastReply.Substring(0, $replyCap) + '...' }
     if ($title.Length -gt 80) { $title = $title.Substring(0, 80) + '...' }
 
+
     # Find PID
     $procPid = 0
     $matchedSession = $false

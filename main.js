@@ -13,6 +13,16 @@ import { NotifyWatcher } from './src/notify.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// 若 cc-wechat 本身是从某个 Claude 会话内被拉起（如开发期用 claude 启动），
+// 会继承 CLAUDE_CODE_CHILD_SESSION/SESSION_ID/CLAUDECODE 等标记，并传染给它派生的
+// 新 claude 标签页，使其以"子会话"模式运行 → 不写 transcript/sessions，回复推不出、/ls 扫不到。
+// 启动即清除这些标记，保证所有子进程都是干净的顶层会话。CLAUDE_CONFIG_DIR 不动。
+for (const k of Object.keys(process.env)) {
+  if (k.startsWith('CLAUDE_CODE_') || k === 'CLAUDECODE' || k === 'CLAUDE_EFFORT') {
+    delete process.env[k];
+  }
+}
+
 let tray = null;
 let mainWindow = null;
 let bot = null;
