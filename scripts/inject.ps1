@@ -41,6 +41,9 @@ public class ConsoleInjector
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     static extern bool WriteConsoleInputW(IntPtr h, INPUT_RECORD[] buf, int len, out int written);
 
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool GetNumberOfConsoleInputEvents(IntPtr h, out int count);
+
     const uint GENERIC_READ  = 0x80000000;
     const uint GENERIC_WRITE = 0x40000000;
     const uint FILE_SHARE_READ  = 0x00000001;
@@ -124,6 +127,61 @@ public class ConsoleInjector
         return true;
     }
 
+    // Wait until the target process has drained queued input down to <= threshold,
+    // so a burst of events cannot overrun/scramble the input that follows.
+    static void DrainInput(IntPtr h, int threshold, int timeoutMs)
+    {
+        int waited = 0;
+        int pending;
+        while (waited < timeoutMs)
+        {
+            if (!GetNumberOfConsoleInputEvents(h, out pending)) return;
+            if (pending <= threshold) return;
+            Thread.Sleep(8);
+            waited += 8;
+        }
+    }
+
+    // Paced writer: write a small chunk, wait for the reader to drain, then continue.
+    // Adapts to the consumer's actual read speed; prevents overflow and burst scrambling.
+    static bool WriteConsoleInputPaced(IntPtr h, INPUT_RECORD[] records, out int totalWritten, out string error)
+    {
+        totalWritten = 0;
+        error = "";
+        int offset = 0;
+        const int chunkSize = 24;       // small chunk leaves the reader a processing window
+        const int drainThreshold = 16;  // write next chunk once buffer drains below this
+        const int drainTimeoutMs = 400; // per-chunk drain cap, avoids hanging if reader stalls
+
+        while (offset < records.Length)
+        {
+            int len = Math.Min(chunkSize, records.Length - offset);
+            var batch = new INPUT_RECORD[len];
+            Array.Copy(records, offset, batch, 0, len);
+
+            int written;
+            bool ok = WriteConsoleInputW(h, batch, batch.Length, out written);
+            if (!ok)
+            {
+                error = "Write failed, code=" + Marshal.GetLastWin32Error();
+                return false;
+            }
+            if (written <= 0)
+            {
+                // buffer full and reader not consuming yet: drain, then retry this chunk
+                DrainInput(h, drainThreshold, drainTimeoutMs);
+                continue;
+            }
+
+            offset += written;
+            totalWritten += written;
+
+            DrainInput(h, drainThreshold, drainTimeoutMs);
+        }
+
+        return true;
+    }
+
     private static IntPtr OpenConIn()
     {
         return CreateFileW("CONIN$", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero, OPEN_EXISTING, 0, IntPtr.Zero);
@@ -138,6 +196,11 @@ public class ConsoleInjector
         IntPtr h = OpenConIn();
         if (h == IntPtr.Zero || h == new IntPtr(-1))
         { FreeConsole(); return "ERR:OpenConIn failed, code=" + Marshal.GetLastWin32Error(); }
+
+        // Wake-up settle: a freshly AttachConsole'd console (especially the first
+        // injection after a long idle) needs a moment to be ready, or the first
+        // chunk of events is easily dropped.
+        Thread.Sleep(80);
 
         var ev = new List<INPUT_RECORD>();
         string[] lines = text.Replace("\r\n", "\n").Split('\n');
@@ -161,7 +224,7 @@ public class ConsoleInjector
         var arr = ev.ToArray();
         int wText;
         string writeError;
-        bool ok = WriteAllConsoleInput(h, arr, out wText, out writeError);
+        bool ok = WriteConsoleInputPaced(h, arr, out wText, out writeError);
         if (!ok)
         {
             CloseHandle(h);
@@ -169,9 +232,10 @@ public class ConsoleInjector
             return "ERR:" + writeError;
         }
 
-        // 根据输入长度动态增加延迟，给 Claude Code 足够的渲染和读取时间，防止吞字或错乱
-        int sleepMs = Math.Max(300, arr.Length / 10);
-        Thread.Sleep(sleepMs);
+        // Wait for the body to be fully read before submitting, so Enter cannot be
+        // consumed ahead of the content (with a timeout safety net).
+        DrainInput(h, 0, 1000);
+        Thread.Sleep(Math.Max(120, arr.Length / 20));
 
         var submit = new INPUT_RECORD[] {
             K(true,  VK_RETURN, '\r', 0),
