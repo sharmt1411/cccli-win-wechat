@@ -168,6 +168,7 @@ try {
 
     $action = switch ($evt) {
         'Notification' { if ($data.message) { [string]$data.message } else { 'need_confirm' } }
+        'StopFailure' { 'failed' }
         default { $evt = 'Stop'; 'done' }
     }
 

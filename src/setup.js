@@ -146,7 +146,7 @@ export function injectHook(claudeDir) {
 
   let modified = false;
 
-  for (const event of ['Stop', 'Notification']) {
+  for (const event of ['Stop', 'StopFailure', 'Notification']) {
     if (!settings.hooks[event]) settings.hooks[event] = [];
     let list = settings.hooks[event];
 
@@ -288,12 +288,17 @@ export function uninstallHook(claudeDir) {
 
 export function ensureHooks() {
   const cfg = loadConfig();
-  if (!cfg.claudeDirs) return;
+  if (!cfg.claudeDirs) return [];
+  const skipped = [];
   for (const dir of cfg.claudeDirs) {
     try {
-      injectHook(dir);
+      const res = injectHook(dir);
+      if (res && res.skipped && res.reason === 'foreign-instance') {
+        skipped.push({ dir, foreignNotifyDir: res.foreignNotifyDir });
+      }
     } catch(e) {
       console.error(`自动更新 hook 失败 (${dir}):`, e.message);
     }
   }
+  return skipped;
 }

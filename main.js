@@ -192,7 +192,14 @@ async function startWeChatService() {
   bot = new WeChatBot();
   bridge = new Bridge(bot);
 
-  ensureHooks();
+  const skipped = ensureHooks();
+  if (skipped && skipped.length > 0) {
+    const msg = skipped.map(s => `- ${s.dir} (接管实例: ${s.foreignNotifyDir})`).join('\n');
+    dialog.showErrorBox(
+      '多实例钩子冲突提醒',
+      `以下 Claude 配置目录已被旧的或其他 cc-wechat 实例接管，本次已跳过覆盖：\n\n${msg}\n\n【如何解决此冲突？】\n方案一：用文本编辑器打开上述 Claude 目录下的 settings.json，手动删掉带有 cc-wechat-notify 字样的旧 hook。\n方案二：打开旧的 cc-wechat 程序，在设置中取消勾选这些目录。\n\n清理完成后，回到本程序重新保存配置即可接管。`
+    );
+  }
 
   // 暴露事件给前端
   bot.on('qrcode', async (qr) => {
@@ -317,7 +324,14 @@ ipcMain.handle('config:save', (event, newConfig) => {
   // 按新的 claudeDirs 重新注入 hook，使目录改动当场生效；
   // 冲突目录会在此处被跳过并把告警打到面板日志，无需重启。
   try {
-    ensureHooks();
+    const skipped = ensureHooks();
+    if (skipped && skipped.length > 0) {
+      const msg = skipped.map(s => `- ${s.dir} (接管实例: ${s.foreignNotifyDir})`).join('\n');
+      dialog.showErrorBox(
+        '多实例钩子冲突提醒',
+        `以下 Claude 配置目录已被旧的或其他 cc-wechat 实例接管，本次已跳过覆盖：\n\n${msg}\n\n【如何解决此冲突？】\n方案一：用文本编辑器打开上述 Claude 目录下的 settings.json，手动删掉带有 cc-wechat-notify 字样的旧 hook。\n方案二：打开旧的 cc-wechat 程序，在设置中取消勾选这些目录。\n\n清理完成后，回到本程序重新保存配置即可接管。`
+      );
+    }
   } catch (e) {
     console.error('保存后注入 hook 失败:', e.message);
   }

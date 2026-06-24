@@ -151,11 +151,14 @@ export class NotifyWatcher {
 
   _format(d, normalizedInteraction = null) {
     const isNotif = d.event === 'Notification';
+    const isFailure = d.event === 'StopFailure';
     const interaction = normalizedInteraction || normalizeInteraction(d);
     const lines = [];
 
     if (isNotif) {
       lines.push('🔔 Claude 需要处理');
+    } else if (isFailure) {
+      lines.push('❌ Claude 执行失败或超时');
     } else {
       lines.push('✅ Claude 执行完成');
     }
@@ -517,7 +520,7 @@ function isGenericWaitingNotification(data) {
 function shouldShowAction(action) {
   const text = normalizeForCompare(action);
   if (!text) return false;
-  if (text === 'done' || text === 'needconfirm') return false;
+  if (text === 'done' || text === 'needconfirm' || text === 'failed') return false;
   if (isGenericWaitingAction(action)) return false;
   return true;
 }

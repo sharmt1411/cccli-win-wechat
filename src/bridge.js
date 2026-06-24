@@ -737,6 +737,7 @@ export class Bridge {
       '勾选: /space',
       '确认: /enter',
       '切换: /tab',
+      '取消: /esc',
       '权限: /perm',
       '帮助: /help',
     ].join('\n'));
