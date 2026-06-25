@@ -345,7 +345,7 @@ function cleanupScreenLine(line) {
 function extractLineOptions(line, row) {
   const checkbox = String.raw`(?:[☐☑☒□■✓✔]|\[[ xX✓✔]\])`;
   const optionPattern = new RegExp(
-    String.raw`(?:^|\s)([>❯]?\s*)?(${checkbox}?\s*)?(\d{1,2})(?:[.)、:：])\s*(${checkbox}?\s*)?`,
+    String.raw`(?:^|\s)([>❯]?\s*)?(${checkbox}?\s*)?(\d{1,2})(?:[.)、:：])(?=\s|$|[\[☐☑☒□■✓✔])\s*(${checkbox}?\s*)?`,
     'gu',
   );
   const matches = [...line.matchAll(optionPattern)];
@@ -353,6 +353,7 @@ function extractLineOptions(line, row) {
 
   for (let i = 0; i < matches.length; i++) {
     const match = matches[i];
+    if (i === 0 && match.index > 0) return []; // 防止匹配到代码段中间的内容（例如 if(a==1) ）
     const start = match.index + match[0].length;
     const end = i + 1 < matches.length ? matches[i + 1].index : line.length;
     let label = line
@@ -367,6 +368,9 @@ function extractLineOptions(line, row) {
       label = label.replace(/^(?:[☐☑☒□■✓✔]|\[[ xX✓✔]\])\s*/u, '').trim();
     }
     if (!label) continue;
+    
+    // 额外安全检查：如果 label 几乎全是代码符号（比如 `{` 或者 `} `），说明极有可能是代码行首的 1) { 误判
+    if (/^[{}()[\]=+\-*/<>&|;,'"`]+$/.test(label.replace(/\s/g, ''))) continue;
 
     options.push({
       number: match[3],
