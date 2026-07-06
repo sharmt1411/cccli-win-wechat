@@ -125,7 +125,7 @@ export async function injectKey(pid, keyName) {
     execFile(
       'powershell',
       ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', INJECT_SCRIPT, '-TargetPid', pid.toString(), '-Key', keyName],
-      { encoding: 'utf8' },
+      { encoding: 'utf8', timeout: 10000 },
       (err, stdout, stderr) => {
         if (err) return reject(new Error(stderr || err.message));
         resolve(stdout);

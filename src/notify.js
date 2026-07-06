@@ -22,6 +22,8 @@ export class NotifyWatcher {
   }
 
   start() {
+    if (this._watcher) return; // 已在监听，避免重复 watch 泄漏句柄
+
     if (!existsSync(this.dir)) {
       mkdirSync(this.dir, { recursive: true });
     }
@@ -42,6 +44,7 @@ export class NotifyWatcher {
 
   stop() {
     this._watcher?.close();
+    this._watcher = null;
   }
 
   _scanDir() {

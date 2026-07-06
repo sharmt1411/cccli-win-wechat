@@ -33,6 +33,17 @@ export class Bridge {
     // 本桥接开启、但 Claude 尚未注册会话文件（首轮对话后才注册）的新 tab。
     // 用控制台 pid 寻址，纳入 /ls、/to 与目标解析；注册后自动并入真实会话。
     this.pendingTabs = [];
+    // 各 Map 的条目多为惰性清理，会话退出后可能永久残留；由 janitor 统一兜底淘汰
+    this._janitorTimer = setInterval(() => this._runJanitor(), 60 * 1000);
+    this._janitorTimer.unref?.();
+  }
+
+  /** 停止后台定时器（应用退出时调用） */
+  stop() {
+    if (this._janitorTimer) {
+      clearInterval(this._janitorTimer);
+      this._janitorTimer = null;
+    }
   }
 
   /** 由 NotifyWatcher 调用，更新最后通知的会话；返回 false 可暂缓推送 */
@@ -1713,6 +1724,40 @@ export class Bridge {
   _isPidAlive(pid) {
     if (!pid) return false;
     try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
+  }
+
+  /** 清理已退出会话在各状态容器中的残留条目 */
+  _runJanitor() {
+    try {
+      const now = Date.now();
+      const list = this.sessions.listActive();
+      this._reconcilePendingTabs(list);
+
+      const alivePids = new Set([
+        ...list.map(s => s.pid),
+        ...this.pendingTabs.map(t => t.consolePid),
+      ]);
+      // capabilityInjectionState 的键是 sessionId || String(pid)（见 _appendCapabilityContext）
+      const aliveKeys = new Set();
+      for (const s of list) {
+        if (s.sessionId) aliveKeys.add(s.sessionId);
+        aliveKeys.add(String(s.pid));
+      }
+      for (const t of this.pendingTabs) aliveKeys.add(String(t.consolePid));
+
+      for (const key of this.capabilityInjectionState.keys()) {
+        if (!aliveKeys.has(key)) this.capabilityInjectionState.delete(key);
+      }
+      for (const [pid, pending] of this.pendingInteractions.entries()) {
+        if (pending.expiresAt < now || !alivePids.has(pid)) this.pendingInteractions.delete(pid);
+      }
+      for (const pid of this.pendingNotificationSessions.keys()) {
+        if (!alivePids.has(pid)) this.pendingNotificationSessions.delete(pid);
+      }
+      this._prunePendingWechatFiles(now);
+    } catch (e) {
+      console.error('状态清理失败:', e.message);
+    }
   }
 
   _appendCapabilityContext(text, target, { choiceLike = false, forcePlainInput = false } = {}) {

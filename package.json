@@ -19,7 +19,7 @@
       "output": "dist"
     },
     "win": {
-      "target": "portable"
+      "target": ["portable"]
     },
     "nsis": {
       "oneClick": false,

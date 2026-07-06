@@ -121,6 +121,7 @@ export class WeChatBot extends EventEmitter {
   // ── 长轮询收消息 ──
 
   async startPolling(onMessage) {
+    if (this._polling) return; // 已有轮询循环在跑，重复启动会导致游标互踩、消息重复
     this._polling = true;
     console.log('📡 开始微信消息轮询...');
 

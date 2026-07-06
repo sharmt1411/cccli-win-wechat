@@ -230,12 +230,14 @@ async function startWeChatService() {
 
   bot.on('login', () => {
     if (mainWindow) mainWindow.webContents.send('wechat:login-success');
-    
-    // 登录成功后开始工作
-    notifier = new NotifyWatcher(bot, (data) => {
-      bridge.onNotify(data);
-    });
-    notifier.start();
+
+    // 登录成功后开始工作（login 事件可能重复触发，只启动一次）
+    if (!notifier) {
+      notifier = new NotifyWatcher(bot, (data) => {
+        bridge.onNotify(data);
+      });
+      notifier.start();
+    }
 
     bot.startPolling(async (msg) => {
       await bridge.handleMessage(msg);
@@ -292,6 +294,9 @@ app.on('window-all-closed', () => {
 });
 
 app.on('will-quit', () => {
+  bot?.stopPolling?.();
+  notifier?.stop?.();
+  bridge?.stop?.();
   releaseInstanceLock();
 });
 

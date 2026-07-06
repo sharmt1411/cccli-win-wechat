@@ -363,11 +363,15 @@
       appendLog('✅ 配置已保存');
     });
 
+    const MAX_LOG_LINES = 500;
     function appendLog(text) {
       const el = document.createElement('div');
       el.className = 'log-line';
       el.textContent = text;
       logsContainer.appendChild(el);
+      while (logsContainer.childElementCount > MAX_LOG_LINES) {
+        logsContainer.removeChild(logsContainer.firstElementChild);
+      }
       logsContainer.scrollTop = logsContainer.scrollHeight;
     }
 
