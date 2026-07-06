@@ -221,13 +221,15 @@ function collectSendRequests(data = {}) {
   const lastReply = stripCcWechatContext(data.lastReply || '');
 
   if (!blocks.length) {
-    for (const match of lastReply.matchAll(sendBlockRegex())) {
+    SEND_BLOCK_PATTERN.lastIndex = 0;
+    for (const match of lastReply.matchAll(SEND_BLOCK_PATTERN)) {
       if (match[1]) blocks.push({ body: match[1].trim(), strict: true });
     }
   }
 
   if (!blocks.length) {
-    for (const match of lastReply.matchAll(jsonBlockRegex())) {
+    JSON_BLOCK_PATTERN.lastIndex = 0;
+    for (const match of lastReply.matchAll(JSON_BLOCK_PATTERN)) {
       if (match[1]) blocks.push({ body: match[1].trim(), strict: false });
     }
   }
@@ -279,8 +281,10 @@ function normalizeSendDirective(value, { allowLegacy = true } = {}) {
 
 function stripSendDirectives(text = '') {
   let output = stripCcWechatContext(text);
-  output = output.replace(sendBlockRegex(), '').trim();
-  output = output.replace(jsonBlockRegex(), (full, body) => {
+  SEND_BLOCK_PATTERN.lastIndex = 0;
+  output = output.replace(SEND_BLOCK_PATTERN, '').trim();
+  JSON_BLOCK_PATTERN.lastIndex = 0;
+  output = output.replace(JSON_BLOCK_PATTERN, (full, body) => {
     try {
       return looksLikeSendDirective(JSON.parse(body)) ? '' : full;
     } catch {
@@ -298,20 +302,9 @@ function stripSendDirectives(text = '') {
   return output.trim();
 }
 
-function sendBlockRegex() {
-  return new RegExp(SEND_BLOCK_PATTERN.source, SEND_BLOCK_PATTERN.flags);
-}
-
-function jsonBlockRegex() {
-  return new RegExp(JSON_BLOCK_PATTERN.source, JSON_BLOCK_PATTERN.flags);
-}
-
 function stripCcWechatContext(text = '') {
-  return String(text || '').replace(contextRegex(), '').trim();
-}
-
-function contextRegex() {
-  return new RegExp(CC_WECHAT_CONTEXT_PATTERN.source, CC_WECHAT_CONTEXT_PATTERN.flags);
+  CC_WECHAT_CONTEXT_PATTERN.lastIndex = 0;
+  return String(text || '').replace(CC_WECHAT_CONTEXT_PATTERN, '').trim();
 }
 
 function extractWholeJsonDirective(text = '') {

@@ -3,13 +3,22 @@ import { readdirSync, readFileSync, existsSync } from 'node:fs';
 import { join, basename } from 'node:path';
 import { get as getConfig } from './config.js';
 
+const ACTIVE_CACHE_TTL_MS = 500;
+
 export class SessionManager {
   constructor() {
     this._dirs = getConfig().claudeDirs || [];
+    this._cachedActive = null;
+    this._cachedActiveAt = 0;
   }
 
-  /** 扫描所有配置目录的活跃会话 */
+  /** 扫描所有配置目录的活跃会话（500ms 缓存，降低高频调用开销） */
   listActive() {
+    const now = Date.now();
+    if (this._cachedActive && now - this._cachedActiveAt < ACTIVE_CACHE_TTL_MS) {
+      return this._cachedActive;
+    }
+
     const sessions = [];
     for (const dir of this._dirs) {
       const sessDir = join(dir, 'sessions');
@@ -43,7 +52,16 @@ export class SessionManager {
         } catch { /* 跳过损坏文件 */ }
       }
     }
-    return sessions.sort((a, b) => b.updatedAt - a.updatedAt);
+    const result = sessions.sort((a, b) => b.updatedAt - a.updatedAt);
+    this._cachedActive = result;
+    this._cachedActiveAt = Date.now();
+    return result;
+  }
+
+  /** 主动清除缓存（在外部感知到会话变化时调用） */
+  invalidateCache() {
+    this._cachedActive = null;
+    this._cachedActiveAt = 0;
   }
 
   /** 按 PID 查找会话 */

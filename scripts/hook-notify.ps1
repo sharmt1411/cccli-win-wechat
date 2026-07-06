@@ -184,99 +184,120 @@ try {
         $sessionId = [System.IO.Path]::GetFileNameWithoutExtension($transcript)
         $lines = [System.IO.File]::ReadAllLines($transcript, [System.Text.Encoding]::UTF8)
 
+        # 三项合并为单次从后往前遍历，全部收集到后立即 break
+        $foundUser = $false
+        $foundAssistant = $false
+        $foundSummary = $false
+
         for ($i = $lines.Length - 1; $i -ge 0; $i--) {
+            if ($foundUser -and $foundAssistant -and $foundSummary) { break }
+
             $line = $lines[$i]
-            if (-not $line -or $line -notmatch '"type"\s*:\s*"user"') { continue }
-            try { $obj = $line | ConvertFrom-Json } catch { continue }
-            if ($obj.type -ne 'user' -or -not $obj.message -or $obj.message.role -ne 'user') { continue }
-            $c = $obj.message.content
-            if ($c -is [string] -and $c.Trim().Length -gt 0 -and $c.Trim()[0] -ne '<') {
-                $lastPrompt = $c.Trim()
-                break
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+
+            # --- summary ---
+            if (-not $foundSummary -and $line -match '"type"\s*:\s*"summary"') {
+                try {
+                    $obj = $line | ConvertFrom-Json
+                    if ($obj.type -eq 'summary' -and $obj.summary) {
+                        $title = [string]$obj.summary
+                        $foundSummary = $true
+                        continue
+                    }
+                } catch {}
             }
-        }
 
-        for ($i = $lines.Length - 1; $i -ge 0; $i--) {
-            $line = $lines[$i]
-            if (-not $line -or $line -notmatch '"type"\s*:\s*"assistant"') { continue }
-            try { $obj = $line | ConvertFrom-Json } catch { continue }
-            if ($obj.type -eq 'assistant' -and $obj.message -and $obj.message.role -eq 'assistant') {
-                $c = $obj.message.content
-                if ($c -is [string]) { $lastReply = $c }
-                elseif ($null -ne $c) {
-                    $contentItems = @($c)
-                    $textArr = $contentItems | Where-Object { $_.type -eq 'text' } | ForEach-Object { $_.text }
-                    # 1. 提取普通文本回复
-                    $textArr = $contentItems | Where-Object { $_.type -eq 'text' } | ForEach-Object { $_.text }
-                    $lastReply = $textArr -join "`n"
-
-                    # 2. 提取 Tool Use (AskUserQuestion 或 Permission)
-                    $tools = $contentItems | Where-Object { $_.type -eq 'tool_use' }
-                    foreach ($tu in $tools) {
-                        if ($tu.name -eq 'AskUserQuestion') {
-                            $question = ''
-                            if ($tu.input -and $tu.input.question) { $question = [string]$tu.input.question }
-
-                            $questions = @()
-                            if ($tu.input -and $tu.input.PSObject.Properties.Name -contains 'questions') {
-                                foreach ($q in @($tu.input.questions)) {
-                                    $convertedQuestion = ConvertQuestion $q
-                                    if ($null -ne $convertedQuestion) { $questions += $convertedQuestion }
-                                }
-                            }
-
-                            $options = @()
-                            $header = ''
-                            $multiSelect = $false
-                            if ($questions.Count -gt 0) {
-                                $question = [string]$questions[0]['question']
-                                $header = [string]$questions[0]['header']
-                                $multiSelect = [bool]$questions[0]['multiSelect']
-                                $options = $questions[0]['options']
-                            } else {
-                                foreach ($prop in @('options', 'choices', 'suggestions')) {
-                                    if ($tu.input -and $tu.input.PSObject.Properties.Name -contains $prop) {
-                                        $rawOptions = $tu.input.$prop
-                                        foreach ($opt in @($rawOptions)) {
-                                            $convertedOption = ConvertOption $opt
-                                            if ($null -ne $convertedOption) { $options += $convertedOption }
-                                        }
-                                        break
-                                    }
-                                }
-                                $header = [string](GetProp $tu.input 'header' '')
-                                $multiSelect = [bool](GetProp $tu.input 'multiSelect' (GetProp $tu.input 'multiselect' $false))
-                            }
-
-                            $interaction = [ordered]@{
-                                type        = 'ask_user_question'
-                                toolName    = [string]$tu.name
-                                question    = $question
-                                header      = $header
-                                multiSelect = $multiSelect
-                                options     = $options
-                                questions   = $questions
-                            }
-                        } elseif (-not $interaction) {
-                            $toolDesc = DescribeToolUse $tu
-                            $interaction = [ordered]@{
-                                type     = 'tool_permission'
-                                toolName = [string]$tu.name
-                                detail   = [string]$toolDesc
-                                options  = @()
-                            }
+            # --- user ---
+            if (-not $foundUser -and $line -match '"type"\s*:\s*"user"') {
+                try {
+                    $obj = $line | ConvertFrom-Json
+                    if ($obj.type -eq 'user' -and $obj.message -and $obj.message.role -eq 'user') {
+                        $c = $obj.message.content
+                        if ($c -is [string] -and $c.Trim().Length -gt 0 -and $c.Trim()[0] -ne '<') {
+                            $lastPrompt = $c.Trim()
+                            $foundUser = $true
+                            continue
                         }
                     }
-                }
-                break
+                } catch {}
             }
-        }
 
-        for ($i = $lines.Length - 1; $i -ge 0; $i--) {
-            $line = $lines[$i]
-            if (-not $line -or $line -notmatch '"type"\s*:\s*"summary"') { continue }
-            try { $obj = $line | ConvertFrom-Json } catch { continue }
-            if ($obj.type -eq 'summary' -and $obj.summary) { $title = [string]$obj.summary; break }
+            # --- assistant ---
+            if (-not $foundAssistant -and $line -match '"type"\s*:\s*"assistant"') {
+                try {
+                    $obj = $line | ConvertFrom-Json
+                    if ($obj.type -eq 'assistant' -and $obj.message -and $obj.message.role -eq 'assistant') {
+                        $c = $obj.message.content
+                        if ($c -is [string]) { $lastReply = $c }
+                        elseif ($null -ne $c) {
+                            $contentItems = @($c)
+                            # 1. 提取普通文本回复
+                            $textArr = $contentItems | Where-Object { $_.type -eq 'text' } | ForEach-Object { $_.text }
+                            $lastReply = $textArr -join "`n"
+
+                            # 2. 提取 Tool Use (AskUserQuestion 或 Permission)
+                            $tools = $contentItems | Where-Object { $_.type -eq 'tool_use' }
+                            foreach ($tu in $tools) {
+                                if ($tu.name -eq 'AskUserQuestion') {
+                                    $question = ''
+                                    if ($tu.input -and $tu.input.question) { $question = [string]$tu.input.question }
+
+                                    $questions = @()
+                                    if ($tu.input -and $tu.input.PSObject.Properties.Name -contains 'questions') {
+                                        foreach ($q in @($tu.input.questions)) {
+                                            $convertedQuestion = ConvertQuestion $q
+                                            if ($null -ne $convertedQuestion) { $questions += $convertedQuestion }
+                                        }
+                                    }
+
+                                    $options = @()
+                                    $header = ''
+                                    $multiSelect = $false
+                                    if ($questions.Count -gt 0) {
+                                        $question = [string]$questions[0]['question']
+                                        $header = [string]$questions[0]['header']
+                                        $multiSelect = [bool]$questions[0]['multiSelect']
+                                        $options = $questions[0]['options']
+                                    } else {
+                                        foreach ($prop in @('options', 'choices', 'suggestions')) {
+                                            if ($tu.input -and $tu.input.PSObject.Properties.Name -contains $prop) {
+                                                $rawOptions = $tu.input.$prop
+                                                foreach ($opt in @($rawOptions)) {
+                                                    $convertedOption = ConvertOption $opt
+                                                    if ($null -ne $convertedOption) { $options += $convertedOption }
+                                                }
+                                                break
+                                            }
+                                        }
+                                        $header = [string](GetProp $tu.input 'header' '')
+                                        $multiSelect = [bool](GetProp $tu.input 'multiSelect' (GetProp $tu.input 'multiselect' $false))
+                                    }
+
+                                    $interaction = [ordered]@{
+                                        type        = 'ask_user_question'
+                                        toolName    = [string]$tu.name
+                                        question    = $question
+                                        header      = $header
+                                        multiSelect = $multiSelect
+                                        options     = $options
+                                        questions   = $questions
+                                    }
+                                } elseif (-not $interaction) {
+                                    $toolDesc = DescribeToolUse $tu
+                                    $interaction = [ordered]@{
+                                        type     = 'tool_permission'
+                                        toolName = [string]$tu.name
+                                        detail   = [string]$toolDesc
+                                        options  = @()
+                                    }
+                                }
+                            }
+                        }
+                        $foundAssistant = $true
+                        continue
+                    }
+                } catch {}
+            }
         }
     }
 

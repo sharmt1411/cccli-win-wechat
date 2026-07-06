@@ -10,6 +10,7 @@ import { dirname, isAbsolute, resolve } from 'node:path';
 
 const NEW_DIR_PAGE_SIZE = 10;
 const PENDING_WECHAT_FILES_TTL_MS = 60 * 60 * 1000;
+const HIDDEN_OR_NOISY_DIRS = new Set(['.git', 'node_modules', '.next', 'dist', 'build', 'out', 'coverage']);
 
 export class Bridge {
   /**
@@ -1561,12 +1562,11 @@ export class Bridge {
   }
 
   _listChildDirectories(dir) {
-    const hiddenOrNoisy = new Set(['.git', 'node_modules', '.next', 'dist', 'build', 'out', 'coverage']);
     try {
       return readdirSync(dir, { withFileTypes: true })
         .filter(entry => entry.isDirectory())
         .filter(entry => !entry.name.startsWith('.'))
-        .filter(entry => !hiddenOrNoisy.has(entry.name))
+        .filter(entry => !HIDDEN_OR_NOISY_DIRS.has(entry.name))
         .sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN'))
         .map(entry => ({
           name: entry.name,

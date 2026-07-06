@@ -1,3 +1,11 @@
+// interaction.js
+// 模块级常量：避免在逐行循环中重复编译正则
+const _CHECKBOX_FRAG = String.raw`(?:[☐☑☒□■✓✔]|\[[ xX✓✔]\])`;
+const OPTION_PATTERN = new RegExp(
+  String.raw`(?:^|\s)([>❯]?\s*)?(${_CHECKBOX_FRAG}?\s*)?(\d{1,2})(?:[.)、:：])(?=\s|$|[\[☐☑☒□■✓✔])\s*(${_CHECKBOX_FRAG}?\s*)?`,
+  'gu',
+);
+
 export function normalizeInteraction(data = {}) {
   const raw = data.interaction || inferLegacyInteraction(data.lastReply) || inferScreenInteraction(data);
   if (!raw) return null;
@@ -343,12 +351,9 @@ function cleanupScreenLine(line) {
 }
 
 function extractLineOptions(line, row) {
-  const checkbox = String.raw`(?:[☐☑☒□■✓✔]|\[[ xX✓✔]\])`;
-  const optionPattern = new RegExp(
-    String.raw`(?:^|\s)([>❯]?\s*)?(${checkbox}?\s*)?(\d{1,2})(?:[.)、:：])(?=\s|$|[\[☐☑☒□■✓✔])\s*(${checkbox}?\s*)?`,
-    'gu',
-  );
-  const matches = [...line.matchAll(optionPattern)];
+  // 重置 lastIndex，复用模块级常量避免每次 new RegExp
+  OPTION_PATTERN.lastIndex = 0;
+  const matches = [...line.matchAll(OPTION_PATTERN)];
   const options = [];
 
   for (let i = 0; i < matches.length; i++) {

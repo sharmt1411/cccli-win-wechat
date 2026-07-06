@@ -2,7 +2,7 @@
 import { execFile } from 'node:child_process';
 import { get as getConfig } from './config.js';
 
-const CACHE_TTL_MS = 2000;
+const CACHE_TTL_MS = 8000;
 let cachedState = null;
 let cachedAt = 0;
 
