@@ -2,7 +2,7 @@
 import { execFile } from 'node:child_process';
 import { get as getConfig } from './config.js';
 
-const CACHE_TTL_MS = 8000;
+const CACHE_TTL_MS = 60000;
 let cachedState = null;
 let cachedAt = 0;
 
@@ -195,7 +195,12 @@ $locked = if ($wtsOk) { $wtsLocked } else { $locked -or $logonUi }
 $li = New-Object CcWechatPresenceNative+LASTINPUTINFO
 $li.cbSize = [Runtime.InteropServices.Marshal]::SizeOf([type][CcWechatPresenceNative+LASTINPUTINFO])
 [CcWechatPresenceNative]::GetLastInputInfo([ref]$li) | Out-Null
-$idleMs = [int64]([Environment]::TickCount - [int]$li.dwTime)
+# TickCount 为 int，系统连续运行超过 ~24.85 天后会回绕为负值；dwTime 为 uint32，也可能越过 Int32 上限。
+# 二者都需先 [int64] 再做回绕修正，否则 [int]/[uint32] 数值强转会抛 InvalidCastIConvertible 导致整个探测失败
+$nowTick = [int64][Environment]::TickCount
+if ($nowTick -lt 0) { $nowTick += 4294967296 }
+$lastInput = [int64]$li.dwTime
+$idleMs = $nowTick - $lastInput
 if ($idleMs -lt 0) { $idleMs += 4294967296 }
 
 $timeoutSeconds = 0
