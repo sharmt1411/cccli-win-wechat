@@ -378,7 +378,9 @@ export class Bridge {
 
     const target = this._resolveTarget();
     const currentIndex = list.findIndex(s => s.pid === target?.pid) + 1;
-    const currentLabel = currentIndex > 0 ? `[${currentIndex}] ${target.project || '未知项目'}` : '未选择';
+    const currentLabel = currentIndex > 0
+      ? `[${currentIndex}] ${this._sessionDisplayTitle(target)}`
+      : '未选择';
     const lines = [
       `📋 Claude Code 会话（${list.length} 个）`,
       `当前: ${currentLabel}`,
@@ -1215,8 +1217,9 @@ export class Bridge {
 
   _formatSessionListItem(session, index, isCurrent) {
     const updated = this._formatUpdatedAt(session.updatedAt);
+    const title = this._sessionDisplayTitle(session);
     const lines = [
-      `[${index}] ${session.project || '未知项目'}`,
+      `[${index}] ${title}`,
       `目录: ${session.cwd || '未知目录'}`,
       `PID: ${session.pid}`,
       this._statusText(session.status),
@@ -1224,6 +1227,28 @@ export class Bridge {
     if (session.source && session.source !== '.claude') lines.push(`来源: ${session.source}`);
     if (updated) lines.push(`更新: ${updated}`);
     return lines;
+  }
+
+  /**
+   * 会话显示标题：优先级 tab名 > 用户最后提问（截断60字）> 目录名
+   */
+  _sessionDisplayTitle(session) {
+    // 1. tab 名字（Claude Code 中用户命名的会话标题）
+    if (session.name) return session.name;
+
+    // 2. 用户最后一条提问（去除微信注入信息后）——仅对已注册会话有效
+    if (!session.isPending) {
+      try {
+        const lastUserMsg = this.sessions.getLastUserMessage(session);
+        if (lastUserMsg) {
+          const oneLiner = lastUserMsg.replace(/\s+/g, ' ').trim();
+          return oneLiner.length > 60 ? `${oneLiner.slice(0, 60)}…` : oneLiner;
+        }
+      } catch { /* 忽略读取错误 */ }
+    }
+
+    // 3. 目录名（备选项）
+    return session.project || '未知项目';
   }
 
   _statusText(status = '') {

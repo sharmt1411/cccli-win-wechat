@@ -41,6 +41,7 @@ export class SessionManager {
             sessionId: data.sessionId,
             cwd: data.cwd || '',
             project: data.cwd ? basename(data.cwd) : '',
+            name: data.name || '',  // Claude Code tab 名称（用户命名的 session 标题）
             status: data.status || 'unknown',
             updatedAt: data.updatedAt || 0,
             version: data.version || '',
@@ -96,6 +97,31 @@ export class SessionManager {
     } catch { /* 文件读取失败 */ }
     return null;
   }
+
+  /** 获取当前会话最后一条用户消息（去除微信注入的 cc-wechat-context 信息） */
+  getLastUserMessage(session) {
+    if (!session.sessionId || !session.claudeDir) return null;
+    const projectKey = cwdToProjectKey(session.cwd);
+    const jsonlPath = join(session.claudeDir, 'projects', projectKey, `${session.sessionId}.jsonl`);
+    if (!existsSync(jsonlPath)) return null;
+
+    try {
+      const content = readFileSync(jsonlPath, 'utf-8');
+      const lines = content.trim().split('\n');
+      // 从后往前找最后一条 user 消息
+      for (let i = lines.length - 1; i >= 0; i--) {
+        if (!lines[i].includes('"user"')) continue;
+        try {
+          const obj = JSON.parse(lines[i]);
+          if (obj.type === 'user' && obj.message?.role === 'user') {
+            const text = extractUserText(obj.message.content);
+            if (text) return text;
+          }
+        } catch { continue; }
+      }
+    } catch { /* 文件读取失败 */ }
+    return null;
+  }
 }
 
 export function isCliSession(data) {
@@ -118,6 +144,27 @@ function extractAssistantText(content) {
       .join('\n');
   }
   return String(content);
+}
+
+/** 提取 user 消息文本并去除微信注入的 cc-wechat-context / cc-wechat-files 信息 */
+function extractUserText(content) {
+  let text = '';
+  if (typeof content === 'string') {
+    text = content;
+  } else if (Array.isArray(content)) {
+    text = content
+      .filter(c => c.type === 'text')
+      .map(c => c.text)
+      .join('\n');
+  } else {
+    text = String(content || '');
+  }
+  // 去除微信渠道注入的上下文标签块（cc-wechat-context、cc-wechat-files）
+  text = text
+    .replace(/\s*<cc-wechat-context\b[^>]*>[\s\S]*?<\/cc-wechat-context>\s*/gi, '')
+    .replace(/\s*<cc-wechat-files\b[^>]*>[\s\S]*?<\/cc-wechat-files>\s*/gi, '')
+    .trim();
+  return text || null;
 }
 
 /** 检查进程是否存活 */
