@@ -1,6 +1,6 @@
 {
   "name": "cc-wechat",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "type": "module",
   "description": "通过微信远程控制 Claude Code CLI",
   "main": "main.js",
